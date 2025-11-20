@@ -141,6 +141,48 @@ Error_Handler();
   while (1)
   {
     /* USER CODE END WHILE */
+	  while (HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &RxHeader, RxData) != HAL_OK) {
+
+	      uint8_t dlc_bytes = (RxHeader.DataLength >> 16) & 0x0F;
+
+	      printf("ID=0x%lX | Data: ", RxHeader.Identifier);
+	      for (int i = 0; i < dlc_bytes; i++) {
+	          printf("%02X ", RxData[i]);
+	      }
+
+	      // Helper union
+	      union { float f; uint8_t b[4]; } conv;
+
+	      if (dlc_bytes >= 8) {
+
+	          // first float
+	          conv.b[0] = RxData[0];
+	          conv.b[1] = RxData[1];
+	          conv.b[2] = RxData[2];
+	          conv.b[3] = RxData[3];
+	          float f1 = conv.f;
+
+	          // second float
+	          conv.b[0] = RxData[4];
+	          conv.b[1] = RxData[5];
+	          conv.b[2] = RxData[6];
+	          conv.b[3] = RxData[7];
+	          float f2 = conv.f;
+
+	          if (RxHeader.Identifier == 0x40) {
+	              printf(" | X=%.2f  Y=%.2f", f1, f2);
+	          }
+	          else if (RxHeader.Identifier == 0x41) {
+	              printf(" | Z=%.2f  Ax=%.2f", f1, f2);
+	          }
+	          else if (RxHeader.Identifier == 0x42) {
+	              printf(" | Ay=%.2f  Az=%.2f", f1, f2);
+	          }
+	      }
+
+	      printf("\r\n");
+	  }
+
 
     /* USER CODE BEGIN 3 */
   }
