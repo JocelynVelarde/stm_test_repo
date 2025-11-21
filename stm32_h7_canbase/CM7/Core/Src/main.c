@@ -55,6 +55,9 @@ FDCAN_TxHeaderTypeDef TxHeader;
 FDCAN_RxHeaderTypeDef RxHeader;
 uint8_t TxData[8] = {0x10, 0x34, 0x54, 0x76, 0x98, 0x00, 0x11, 0x22};
 uint8_t RxData[8];
+float currentYaw = 0.0f;
+float currentDist = 0.0f;
+int32_t currentTicks = 0;
 
 /* USER CODE END PV */
 
@@ -64,11 +67,80 @@ static void MX_GPIO_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_FDCAN1_Init(void);
 /* USER CODE BEGIN PFP */
+void CAN_Process_Messages(void);
+float getYaw(void);
+float getDistance(void);
+int32_t getTicks(void);
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+// --- 1. The Processing Engine ---
+// Call this as often as possible to keep data fresh
+void CAN_Process_Messages(void)
+{
+	FDCAN_RxHeaderTypeDef localHeader;
+		 	        int ret;
+
+
+		 	        ret = HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &localHeader, RxData);
+
+		 	        /* Process all available messages */
+		 	                while (ret == HAL_OK) {
+		 	                    uint8_t dlc_bytes;
+		 	                    if (localHeader.DataLength > 0x0F) {
+		 	                        dlc_bytes = (localHeader.DataLength >> 16) & 0x0F;
+		 	                    } else {
+		 	                        dlc_bytes = (uint8_t)localHeader.DataLength;
+		 	                    }
+
+		 	                    //printf("RECV: ID=0x%lX | DLC=%u", localHeader.Identifier, dlc_bytes);
+
+		 	                   if (dlc_bytes >= 4) {
+		 	                                   // This is 'Yaw' for ID 0x40, or 'Distance' for ID 0x30
+		 	                                   union { float f; uint8_t b[4]; } conv;
+		 	                                   conv.b[0] = RxData[0];
+		 	                                   conv.b[1] = RxData[1];
+		 	                                   conv.b[2] = RxData[2];
+		 	                                   conv.b[3] = RxData[3];
+		 	                                   float val1 = conv.f;
+
+		 	                                   // --- Handle ID 0x40 (Yaw Only) ---
+		 	                                   if (localHeader.Identifier == 0x40) {
+		 	                                       //printf("IMU  | Yaw=%.2f", val1);
+		 	                                      currentYaw = val1;
+		 	                                   }
+
+		 	                                   // --- Handle ID 0x30 (Distance + Tick) ---
+		 	                                   else if (localHeader.Identifier == 0x30 && dlc_bytes >= 8) {
+		 	                                       int32_t encoderTick;
+		 	                                       memcpy(&encoderTick, &RxData[4], sizeof(int32_t));
+
+		 	                                       //printf("ENCO | Dist=%.2f cm | Tick=%ld", val1, encoderTick);
+		 	                                      currentDist = val1;
+		 	                                      currentTicks = encoderTick;
+		 	                                   }
+		 	                               }
+		 	                    //printf("\r\n");
+		 	                    ret = HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &localHeader, RxData);
+		 	                }
+
+}
+
+// --- 2. The Getter Functions ---
+float getYaw(void) {
+    return currentYaw;
+}
+
+float getDistance(void) {
+    return currentDist;
+}
+
+int32_t getTicks(void) {
+    return currentTicks;
+}
 
 /* USER CODE END 0 */
 
@@ -140,58 +212,16 @@ Error_Handler();
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  /* Robust receive loop: read one message if available and drain FIFO */
-	  /* Robust receive loop: read one message if available and drain FIFO */
-	 	  FDCAN_RxHeaderTypeDef localHeader;
-	 	        int ret;
+	        CAN_Process_Messages();
+	        float myYaw = getYaw();
+	        float myDist = getDistance();
+	        int32_t myTicks = getTicks();
+	        printf("VALORES -> Yaw: %.2f | Dist: %.2f | Ticks: %ld\r\n", myYaw, myDist, myTicks);
 
-	 	        /* Try to read first message */
-	 	        ret = HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &localHeader, RxData);
-
-	 	        /* Process all available messages */
-	 	                while (ret == HAL_OK) {
-	 	                    // 1. FIX: Calculate DLC correctly (handling raw vs encoded)
-	 	                    uint8_t dlc_bytes;
-	 	                    if (localHeader.DataLength > 0x0F) {
-	 	                        dlc_bytes = (localHeader.DataLength >> 16) & 0x0F;
-	 	                    } else {
-	 	                        dlc_bytes = (uint8_t)localHeader.DataLength;
-	 	                    }
-
-	 	                    printf("RECV: ID=0x%lX | DLC=%u", localHeader.Identifier, dlc_bytes);
-
-	 	                   if (dlc_bytes >= 4) {
-	 	                                   // --- Decode First 4 Bytes (Float) ---
-	 	                                   // This is 'Yaw' for ID 0x40, or 'Distance' for ID 0x30
-	 	                                   union { float f; uint8_t b[4]; } conv;
-	 	                                   conv.b[0] = RxData[0];
-	 	                                   conv.b[1] = RxData[1];
-	 	                                   conv.b[2] = RxData[2];
-	 	                                   conv.b[3] = RxData[3];
-	 	                                   float val1 = conv.f;
-
-	 	                                   // --- Handle ID 0x40 (Yaw Only) ---
-	 	                                   if (localHeader.Identifier == 0x40) {
-	 	                                       printf("IMU  | Yaw=%.2f", val1);
-	 	                                   }
-	 	                                   // --- Handle ID 0x30 (Distance + Tick) ---
-	 	                                   else if (localHeader.Identifier == 0x30 && dlc_bytes >= 8) {
-	 	                                       // Decode second half as Int32 (Encoder Tick/Count)
-	 	                                       int32_t encoderTick;
-	 	                                       memcpy(&encoderTick, &RxData[4], sizeof(int32_t));
-
-	 	                                       printf("ENCO | Dist=%.2f cm | Tick=%ld", val1, encoderTick);
-	 	                                   }
-	 	                               }
-	 	                    printf("\r\n");
-
-	 	                    /* Get next message */
-	 	                    ret = HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &localHeader, RxData);
-	 	                }
+  }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-  }
   /* USER CODE END 3 */
 }
 
