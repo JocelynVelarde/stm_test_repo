@@ -70,12 +70,15 @@ uint8_t RxData[8];
 
 // Variables from the ESP32s
 float currentYaw = 0.0f;
-// int32_t currentTicks = 0;
+// Ticks received via CAN
+volatile int32_t currentTicks = 0;
+// Previous TIM4 counter value for local encoder delta calculation
+volatile uint16_t prev_tim4_cnt = 0;
 
 // Constants for odometry
 float const wheel_diameter_cm = 6.3f;
 float const wheel_circumference_cm = (M_PI * wheel_diameter_cm);
-float const ticks_per_cm = (1490.0f / 100.0f); 
+float const ticks_per_cm = (1500.0f / 267.0f); 
 float const ticks_per_rev = ticks_per_cm * wheel_circumference_cm;
 
 /* USER CODE END PV */
@@ -100,7 +103,6 @@ void stopCarEsc(void);
 static uint8_t esc_invert = 0;
 
 /* Encoder tracking variables */
-volatile uint16_t prev_tim4_cnt = 0;
 volatile int32_t encoder_tick_count = 0;
 
 static inline uint16_t esc_apply_dir(uint16_t us)
@@ -123,34 +125,37 @@ int32_t getLocalEncoderTicks(void);
 // Call this as often as possible to keep data fresh
 void CAN_Process_Messages(void)
 {
-    FDCAN_RxHeaderTypeDef localHeader;
-    int ret;
+	FDCAN_RxHeaderTypeDef localHeader;
+  int ret;
+  ret = HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &localHeader, RxData);
 
-    ret = HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &localHeader, RxData);
+	/* Process all available messages */
+  while (ret == HAL_OK) {
+      uint8_t dlc_bytes;
+      if (localHeader.DataLength > 0x0F) {
+          dlc_bytes = (localHeader.DataLength >> 16) & 0x0F;
+      } else {
+          dlc_bytes = (uint8_t)localHeader.DataLength;
+      }
 
-    /* Process all available messages */
-    while (ret == HAL_OK) {
-        uint8_t dlc_bytes = (localHeader.DataLength > 0x0F) 
-                            ? (localHeader.DataLength >> 16) & 0x0F 
-                            : (uint8_t)localHeader.DataLength;
+      //printf("RECV: ID=0x%lX | DLC=%u", localHeader.Identifier, dlc_bytes);
 
-        if (dlc_bytes == 8 && localHeader.Identifier == 0x30) {
-            // --- Extract Yaw ---
-            union { float f; uint8_t b[4]; } conv;
-            conv.b[0] = RxData[0];
-            conv.b[1] = RxData[1];
-            conv.b[2] = RxData[2];
-            conv.b[3] = RxData[3];
-            currentYaw = conv.f;
+      if (dlc_bytes >= 4) {
+        union { float f; uint8_t b[4]; } conv;
+        conv.b[0] = RxData[0];
+        conv.b[1] = RxData[1];
+        conv.b[2] = RxData[2];
+        conv.b[3] = RxData[3];
+        currentYaw = conv.f;
 
-            // --- Extract Encoder ticks ---
-            /* Encoder ticks in CAN message are ignored now -  local TIM4 encoder instead */
-            /* memcpy(&currentTicks, &RxData[4], sizeof(int32_t)); */
-        }
-
-        // Get next message if available
-        ret = HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &localHeader, RxData);
+        // --- Extract Encoder ticks ---
+        /* Encoder ticks in CAN message are ignored now -  local TIM4 encoder instead */
+        memcpy(&currentTicks, &RxData[4], sizeof(int32_t));
     }
+
+    // Get next message if available
+    ret = HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &localHeader, RxData);
+  }
 }
 
 // --- Getter Functions ---
@@ -160,6 +165,10 @@ float getYaw(void) {
 
 float getDistance(void) {
   return (float)getLocalEncoderTicks() / ticks_per_cm;
+}
+
+int32_t getTicks(void) {
+  return currentTicks;
 }
 
 void Encoder_Update(void)
@@ -245,49 +254,75 @@ int main(void)
   HAL_TIM_PWM_Start(&htim13, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
 
+
+  Motion_t motion;
+  Motion_Init(&motion);
+
   stopCarEsc();
   printf("ESC initialized, waiting 1 second...\n");
   HAL_Delay(1000);
 
-  __HAL_TIM_SET_COUNTER(&htim4, 0);
-  prev_tim4_cnt = 0;
-  encoder_tick_count = 0;
+  // __HAL_TIM_SET_COUNTER(&htim4, 0);
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
 
+  // {
+  //   // TEST TO MOVE THE CAR FORWARD AND STOP
+  //   printf("ESC set to neutral (1500 us)\n");
+  //   setEscSpeed_us(1500); // Neutral
+  //   HAL_Delay(2000);
+
+  //   printf("ESC set to forward (2000 us)\n");
+  //   setEscSpeed_us(2000); // Forward
+  //   HAL_Delay(3000);
+  // }
+
+  /*
   {
-    const int total_ms = 5000;
-    const int step_ms = 1; /* update interval */
-    const int iterations = total_ms / step_ms;
-    int i;
+      const float target_cm = 30.0f;
+      const uint32_t poll_ms = 10;
+      const uint32_t timeout_ms = 20000;
+      encoder_tick_count = 0;
 
-    printf("Starting movement for %d ms...\n", total_ms);
-    setEscSpeed_us(esc_apply_dir(2000));
+    
+      printf("Starting movement for %.1f cm using ESC only...\n", target_cm);
 
-    for (i = 0; i < iterations; ++i) {
-      CAN_Process_Messages();
-      Encoder_Update();
-      HAL_Delay(step_ms);
-    }
+      setEscSpeed_us(esc_apply_dir(2000));
 
-    Encoder_Update();
-    stopCarEsc();
-    HAL_Delay(100); 
+      uint32_t start = HAL_GetTick();
+      while (getDistance() < target_cm) {
+          if ((HAL_GetTick() - start) > timeout_ms) {
+              printf("Timeout reached before target distance\n");
+              break;
+          }
 
-    printf("Movement finished. EncoderTicks: %ld\n", (long)getLocalEncoderTicks());
+          Encoder_Update();
+          HAL_Delay(poll_ms);
+      }
+
+      setEscSpeed_us(esc_apply_dir(1500));
+      HAL_Delay(100);
+
+      printf("Reached distance: %.2f cm, EncoderTicks: %ld\n", getDistance(), (long)getLocalEncoderTicks());
   }
+  */
 
   while (1)
   {
-    /* idle loop */
-    HAL_Delay(1000);
+      CAN_Process_Messages();
+      float Yaw = getYaw();
+      int ticks = getTicks();
+
+      printf("Yaw: %.2f deg, Ticks: %d\n", Yaw, ticks);
+      HAL_Delay(100);
   }
     /* USER CODE END WHILE */
 
-    /* USER CODE BEG	IN 3 */
+    /* USER CODE BEGIN 3 */
+
   /* USER CODE END 3 */
 }
 
@@ -530,10 +565,10 @@ static void MX_TIM4_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN TIM4_Init 2 */
-  HAL_TIM_Encoder_Start(&htim4,TIM_CHANNEL_ALL);
+  // HAL_TIM_Encoder_Start(&htim4,TIM_CHANNEL_ALL);
 
   /* Initialize previous TIM4 counter to current value to avoid a large first delta */
-  prev_tim4_cnt = (uint16_t)__HAL_TIM_GET_COUNTER(&htim4);
+  // prev_tim4_cnt = (uint16_t)__HAL_TIM_GET_COUNTER(&htim4);
 
   /* USER CODE END TIM4_Init 2 */
 
@@ -571,7 +606,7 @@ static void MX_TIM13_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 0;
+  sConfigOC.Pulse = 1500;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
   if (HAL_TIM_PWM_ConfigChannel(&htim13, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
