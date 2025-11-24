@@ -70,7 +70,7 @@ uint8_t RxData[8];
 
 // Variables from the ESP32s
 float currentYaw = 0.0f;
-int32_t currentTicks = 0;
+// int32_t currentTicks = 0;
 
 // Constants for odometry
 float const wheel_diameter_cm = 6.3f;
@@ -78,21 +78,6 @@ float const wheel_circumference_cm = (M_PI * wheel_diameter_cm);
 float const ticks_per_cm = (1490.0f / 100.0f); 
 float const ticks_per_rev = ticks_per_cm * wheel_circumference_cm;
 
-// ESC control functions
-void setEscSpeed_us(uint16_t pulse_us);
-void stopCarEsc(void);                 
-static uint8_t esc_invert = 1;
-
-/* Encoder tracking variables */
-volatile uint16_t prev_tim4_cnt = 0;
-volatile int32_t encoder_tick_count = 0;
-
-static inline uint16_t esc_apply_dir(uint16_t us)
-{
-    if (us < 1000) us = 1000;
-    if (us > 2000) us = 2000;
-    return esc_invert ? (uint16_t)(3000 - us) : us;
-}
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -108,6 +93,23 @@ void CAN_Process_Messages(void);
 float getYaw(void);
 int32_t getTicks(void);
 float getDistance(void);
+
+// ESC control functions
+void setEscSpeed_us(uint16_t pulse_us);
+void stopCarEsc(void);                 
+static uint8_t esc_invert = 0;
+
+/* Encoder tracking variables */
+volatile uint16_t prev_tim4_cnt = 0;
+volatile int32_t encoder_tick_count = 0;
+
+static inline uint16_t esc_apply_dir(uint16_t us)
+{
+    if (us < 1000) us = 1000;
+    if (us > 2000) us = 2000;
+    return esc_invert ? (uint16_t)(3000 - us) : us;
+}
+
 /* Encoder helper prototypes */
 void Encoder_Update(void);
 int32_t getLocalEncoderTicks(void);
@@ -243,51 +245,49 @@ int main(void)
   HAL_TIM_PWM_Start(&htim13, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
 
-  /* Initialize Motion controller*/
-  Motion_t motion;
-  Motion_Init(&motion);
-
-  /* Setting heading lock to 0 degrees */
-  Motion_SetTargetYaw(&motion, 0.0f);
-
-  /* Tell motion module the real servo center mapping */
-  Motion_SetServoCenter(&motion, 17.0f);
-
-  /* give ESC time to detect neutral and arm*/
-  HAL_Delay(2000);
+  stopCarEsc();
+  printf("ESC initialized, waiting 1 second...\n");
+  HAL_Delay(1000);
 
   __HAL_TIM_SET_COUNTER(&htim4, 0);
-
   prev_tim4_cnt = 0;
   encoder_tick_count = 0;
-  Motion_AcceptCoords(&motion, 30.0f, 0.0f);
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  while (1)
+
   {
-    CAN_Process_Messages();
-    float myYaw = getYaw();
+    const int total_ms = 5000;
+    const int step_ms = 1; /* update interval */
+    const int iterations = total_ms / step_ms;
+    int i;
 
-    Encoder_Update();
-    float dist_cm = getDistance();
+    printf("Starting movement for %d ms...\n", total_ms);
+    setEscSpeed_us(esc_apply_dir(2000));
 
-    Motion_UpdateWithThrottle(&motion, dist_cm, 0.0f, myYaw);
-
-    printf("Distance cm: %.2f\r\n", dist_cm);
-
-    if (dist_cm >= 30.0f) {
-      Motion_Stop(&motion);
-      printf("Reached 30 cm (%.2f cm). Stopped.\r\n", dist_cm);
-      break;
+    for (i = 0; i < iterations; ++i) {
+      CAN_Process_Messages();
+      Encoder_Update();
+      HAL_Delay(step_ms);
     }
 
-    HAL_Delay(20);
+    Encoder_Update();
+    stopCarEsc();
+    HAL_Delay(100); 
+
+    printf("Movement finished. EncoderTicks: %ld\n", (long)getLocalEncoderTicks());
+  }
+
+  while (1)
+  {
+    /* idle loop */
+    HAL_Delay(1000);
   }
     /* USER CODE END WHILE */
 
-    /* USER CODE BEGIN 3 */
+    /* USER CODE BEG	IN 3 */
   /* USER CODE END 3 */
 }
 
