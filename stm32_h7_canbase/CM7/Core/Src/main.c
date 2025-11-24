@@ -26,6 +26,11 @@
 #include "servo.h"
 #include "motion.h"
 #include <string.h>
+#include <math.h>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -51,6 +56,7 @@
 FDCAN_HandleTypeDef hfdcan1;
 
 TIM_HandleTypeDef htim2;
+TIM_HandleTypeDef htim4;
 TIM_HandleTypeDef htim13;
 
 UART_HandleTypeDef huart3;
@@ -62,20 +68,31 @@ FDCAN_RxHeaderTypeDef RxHeader;
 uint8_t TxData[8] = {0x10, 0x34, 0x54, 0x76, 0x98, 0x00, 0x11, 0x22};
 uint8_t RxData[8];
 
+// Variables from the ESP32s
 float currentYaw = 0.0f;
-float currentDist = 0.0f;
 int32_t currentTicks = 0;
 
+// Constants for odometry
+float const wheel_diameter_cm = 6.3f;
+float const wheel_circumference_cm = (M_PI * wheel_diameter_cm);
+float const ticks_per_cm = (1490.0f / 100.0f); 
+float const ticks_per_rev = ticks_per_cm * wheel_circumference_cm;
+
+// ESC control functions
 void setEscSpeed_us(uint16_t pulse_us);
 void stopCarEsc(void);                 
-static uint8_t esc_invert = 1; // 0 = normal, 1 = invertido
+static uint8_t esc_invert = 1;
+
+/* Encoder tracking variables */
+volatile uint16_t prev_tim4_cnt = 0;
+volatile int32_t encoder_tick_count = 0;
+
 static inline uint16_t esc_apply_dir(uint16_t us)
 {
     if (us < 1000) us = 1000;
     if (us > 2000) us = 2000;
     return esc_invert ? (uint16_t)(3000 - us) : us;
 }
-
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -85,11 +102,15 @@ static void MX_USART3_UART_Init(void);
 static void MX_FDCAN1_Init(void);
 static void MX_TIM13_Init(void);
 static void MX_TIM2_Init(void);
+static void MX_TIM4_Init(void);
 /* USER CODE BEGIN PFP */
 void CAN_Process_Messages(void);
 float getYaw(void);
-float getDistance(void);
 int32_t getTicks(void);
+float getDistance(void);
+/* Encoder helper prototypes */
+void Encoder_Update(void);
+int32_t getLocalEncoderTicks(void);
 
 /* USER CODE END PFP */
 
@@ -100,65 +121,56 @@ int32_t getTicks(void);
 // Call this as often as possible to keep data fresh
 void CAN_Process_Messages(void)
 {
-	FDCAN_RxHeaderTypeDef localHeader;
-		 	        int ret;
+    FDCAN_RxHeaderTypeDef localHeader;
+    int ret;
 
+    ret = HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &localHeader, RxData);
 
-		 	        ret = HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &localHeader, RxData);
+    /* Process all available messages */
+    while (ret == HAL_OK) {
+        uint8_t dlc_bytes = (localHeader.DataLength > 0x0F) 
+                            ? (localHeader.DataLength >> 16) & 0x0F 
+                            : (uint8_t)localHeader.DataLength;
 
-		 	        /* Process all available messages */
-		 	                while (ret == HAL_OK) {
-		 	                    uint8_t dlc_bytes;
-		 	                    if (localHeader.DataLength > 0x0F) {
-		 	                        dlc_bytes = (localHeader.DataLength >> 16) & 0x0F;
-		 	                    } else {
-		 	                        dlc_bytes = (uint8_t)localHeader.DataLength;
-		 	                    }
+        if (dlc_bytes == 8 && localHeader.Identifier == 0x30) {
+            // --- Extract Yaw ---
+            union { float f; uint8_t b[4]; } conv;
+            conv.b[0] = RxData[0];
+            conv.b[1] = RxData[1];
+            conv.b[2] = RxData[2];
+            conv.b[3] = RxData[3];
+            currentYaw = conv.f;
 
-		 	                    //printf("RECV: ID=0x%lX | DLC=%u", localHeader.Identifier, dlc_bytes);
+            // --- Extract Encoder ticks ---
+            /* Encoder ticks in CAN message are ignored now -  local TIM4 encoder instead */
+            /* memcpy(&currentTicks, &RxData[4], sizeof(int32_t)); */
+        }
 
-		 	                   if (dlc_bytes >= 4) {
-		 	                                   // This is 'Yaw' for ID 0x40, or 'Distance' for ID 0x30
-		 	                                   union { float f; uint8_t b[4]; } conv;
-		 	                                   conv.b[0] = RxData[0];
-		 	                                   conv.b[1] = RxData[1];
-		 	                                   conv.b[2] = RxData[2];
-		 	                                   conv.b[3] = RxData[3];
-		 	                                   float val1 = conv.f;
-
-		 	                                   // --- Handle ID 0x40 (Yaw Only) ---
-		 	                                   if (localHeader.Identifier == 0x40) {
-		 	                                       //printf("IMU  | Yaw=%.2f", val1);
-		 	                                      currentYaw = val1;
-		 	                                   }
-
-		 	                                   // --- Handle ID 0x30 (Distance + Tick) ---
-		 	                                   else if (localHeader.Identifier == 0x30 && dlc_bytes >= 8) {
-		 	                                       int32_t encoderTick;
-		 	                                       memcpy(&encoderTick, &RxData[4], sizeof(int32_t));
-
-		 	                                       //printf("ENCO | Dist=%.2f cm | Tick=%ld", val1, encoderTick);
-		 	                                      currentDist = val1;
-		 	                                      currentTicks = encoderTick;
-		 	                                   }
-		 	                               }
-		 	                    //printf("\r\n");
-		 	                    ret = HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &localHeader, RxData);
-		 	                }
-
+        // Get next message if available
+        ret = HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &localHeader, RxData);
+    }
 }
 
-// --- 2. The Getter Functions ---
+// --- Getter Functions ---
 float getYaw(void) {
     return currentYaw;
 }
 
 float getDistance(void) {
-    return currentDist;
+  return (float)getLocalEncoderTicks() / ticks_per_cm;
 }
 
-int32_t getTicks(void) {
-    return currentTicks;
+void Encoder_Update(void)
+{
+    uint16_t cnt = (uint16_t)__HAL_TIM_GET_COUNTER(&htim4);
+    int16_t delta = (int16_t)(cnt - prev_tim4_cnt);
+    encoder_tick_count += (int32_t)delta;
+    prev_tim4_cnt = cnt;
+}
+
+int32_t getLocalEncoderTicks(void)
+{
+    return encoder_tick_count;
 }
 
 /* USER CODE END 0 */
@@ -173,11 +185,11 @@ int main(void)
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
-  /* USER CODE BEGIN Boot_Mode_Sequence_0 */
+/* USER CODE BEGIN Boot_Mode_Sequence_0 */
   int32_t timeout;
-  /* USER CODE END Boot_Mode_Sequence_0 */
+/* USER CODE END Boot_Mode_Sequence_0 */
 
-  /* USER CODE BEGIN Boot_Mode_Sequence_1 */
+/* USER CODE BEGIN Boot_Mode_Sequence_1 */
   /* Wait until CPU2 boots and enters in stop mode or timeout*/
   timeout = 0xFFFF;
   while((__HAL_RCC_GET_FLAG(RCC_FLAG_D2CKRDY) != RESET) && (timeout-- > 0));
@@ -185,7 +197,7 @@ int main(void)
   {
   Error_Handler();
   }
-  /* USER CODE END Boot_Mode_Sequence_1 */
+/* USER CODE END Boot_Mode_Sequence_1 */
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
@@ -197,7 +209,7 @@ int main(void)
 
   /* Configure the system clock */
   SystemClock_Config();
-  /* USER CODE BEGIN Boot_Mode_Sequence_2 */
+/* USER CODE BEGIN Boot_Mode_Sequence_2 */
   /* When system initialization is finished, Cortex-M7 will release Cortex-M4 by means of
   HSEM notification */
   /*HW semaphore Clock enable*/
@@ -213,7 +225,7 @@ int main(void)
   {
   Error_Handler();
   }
-  /* USER CODE END Boot_Mode_Sequence_2 */
+/* USER CODE END Boot_Mode_Sequence_2 */
 
   /* USER CODE BEGIN SysInit */
 
@@ -225,6 +237,7 @@ int main(void)
   MX_FDCAN1_Init();
   MX_TIM13_Init();
   MX_TIM2_Init();
+  MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
   /* Start PWM for servo (TIM13) and ESC (TIM2) */
   HAL_TIM_PWM_Start(&htim13, TIM_CHANNEL_1);
@@ -234,29 +247,43 @@ int main(void)
   Motion_t motion;
   Motion_Init(&motion);
 
-  // Setting heading lock to 0 degrees
+  /* Setting heading lock to 0 degrees */
   Motion_SetTargetYaw(&motion, 0.0f);
 
-  /* set initial servo position to middle */
-  Servo_SetAngleDegrees(17.0f);
+  /* Tell motion module the real servo center mapping */
+  Motion_SetServoCenter(&motion, 17.0f);
 
   /* give ESC time to detect neutral and arm*/
   HAL_Delay(2000);
 
+  __HAL_TIM_SET_COUNTER(&htim4, 0);
+
+  prev_tim4_cnt = 0;
+  encoder_tick_count = 0;
+  Motion_AcceptCoords(&motion, 30.0f, 0.0f);
   /* USER CODE END 2 */
+
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
     CAN_Process_Messages();
     float myYaw = getYaw();
-    float myDist = getDistance();
-    int32_t myTicks = getTicks();
 
-    /* Use Motion to move forward and control steering via PID */
-    Motion_MoveForward(&motion, 100); /* throttle */
+    Encoder_Update();
+    float dist_cm = getDistance();
 
-    HAL_Delay(200);
+    Motion_UpdateWithThrottle(&motion, dist_cm, 0.0f, myYaw);
+
+    printf("Distance cm: %.2f\r\n", dist_cm);
+
+    if (dist_cm >= 30.0f) {
+      Motion_Stop(&motion);
+      printf("Reached 30 cm (%.2f cm). Stopped.\r\n", dist_cm);
+      break;
+    }
+
+    HAL_Delay(20);
   }
     /* USER CODE END WHILE */
 
@@ -445,7 +472,7 @@ static void MX_TIM2_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 3225;
+  sConfigOC.Pulse = 1500;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
   if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
@@ -456,6 +483,59 @@ static void MX_TIM2_Init(void)
 
   /* USER CODE END TIM2_Init 2 */
   HAL_TIM_MspPostInit(&htim2);
+
+}
+
+/**
+  * @brief TIM4 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM4_Init(void)
+{
+
+  /* USER CODE BEGIN TIM4_Init 0 */
+
+  /* USER CODE END TIM4_Init 0 */
+
+  TIM_Encoder_InitTypeDef sConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM4_Init 1 */
+
+  /* USER CODE END TIM4_Init 1 */
+  htim4.Instance = TIM4;
+  htim4.Init.Prescaler = 0;
+  htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim4.Init.Period = 65535;
+  htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  sConfig.EncoderMode = TIM_ENCODERMODE_TI12;
+  sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
+  sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
+  sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
+  sConfig.IC1Filter = 0;
+  sConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
+  sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
+  sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
+  sConfig.IC2Filter = 0;
+  if (HAL_TIM_Encoder_Init(&htim4, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM4_Init 2 */
+  HAL_TIM_Encoder_Start(&htim4,TIM_CHANNEL_ALL);
+
+  /* Initialize previous TIM4 counter to current value to avoid a large first delta */
+  prev_tim4_cnt = (uint16_t)__HAL_TIM_GET_COUNTER(&htim4);
+
+  /* USER CODE END TIM4_Init 2 */
 
 }
 
@@ -491,7 +571,7 @@ static void MX_TIM13_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 3225;
+  sConfigOC.Pulse = 0;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
   if (HAL_TIM_PWM_ConfigChannel(&htim13, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)

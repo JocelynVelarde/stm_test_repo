@@ -29,7 +29,7 @@ void Servo_SetAngleDegrees(float degrees)
 {
     if (degrees < 0.0f) degrees = 0.0f;
     if (degrees > 180.0f) degrees = 180.0f;
-    /* map 0..180 -> SERVO_MIN_US..SERVO_MAX_US */
+
     float us = SERVO_MIN_US + (degrees / 180.0f) * (SERVO_MAX_US - SERVO_MIN_US);
     Servo_SetPulse_us((uint16_t)us);
 }

@@ -73,6 +73,10 @@ void Error_Handler(void);
 #define FDCAN1_RX_GPIO_Port GPIOD
 #define FDCAN1_TX_Pin GPIO_PIN_1
 #define FDCAN1_TX_GPIO_Port GPIOD
+#define ENC_A_Pin GPIO_PIN_6
+#define ENC_A_GPIO_Port GPIOB
+#define ENC_B_Pin GPIO_PIN_7
+#define ENC_B_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 
