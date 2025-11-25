@@ -96,6 +96,7 @@ void CAN_Process_Messages(void);
 float getYaw(void);
 int32_t getTicks(void);
 float getDistance(void);
+float getCanDistance(void);
 
 // ESC control functions
 void setEscSpeed_us(uint16_t pulse_us);
@@ -169,6 +170,11 @@ float getDistance(void) {
 
 int32_t getTicks(void) {
   return currentTicks;
+}
+
+/* Get distance in cm from CAN ticks */
+float getCanDistance(void) {
+  return (float)currentTicks / ticks_per_cm;
 }
 
 void Encoder_Update(void)
@@ -259,7 +265,6 @@ int main(void)
   Motion_Init(&motion);
 
   stopCarEsc();
-  printf("ESC initialized, waiting 1 second...\n");
   HAL_Delay(1000);
 
   // __HAL_TIM_SET_COUNTER(&htim4, 0);
@@ -269,55 +274,105 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
 
-  // {
-  //   // TEST TO MOVE THE CAR FORWARD AND STOP
-  //   printf("ESC set to neutral (1500 us)\n");
-  //   setEscSpeed_us(1500); // Neutral
-  //   HAL_Delay(2000);
-
-  //   printf("ESC set to forward (2000 us)\n");
-  //   setEscSpeed_us(2000); // Forward
-  //   HAL_Delay(3000);
-  // }
-
-  /*
-  {
-      const float target_cm = 30.0f;
-      const uint32_t poll_ms = 10;
-      const uint32_t timeout_ms = 20000;
-      encoder_tick_count = 0;
-
-    
-      printf("Starting movement for %.1f cm using ESC only...\n", target_cm);
-
-      setEscSpeed_us(esc_apply_dir(2000));
-
-      uint32_t start = HAL_GetTick();
-      while (getDistance() < target_cm) {
-          if ((HAL_GetTick() - start) > timeout_ms) {
-              printf("Timeout reached before target distance\n");
-              break;
-          }
-
-          Encoder_Update();
-          HAL_Delay(poll_ms);
-      }
-
-      setEscSpeed_us(esc_apply_dir(1500));
+  // Odometry variables
+  float pos_x = 0.0f;
+  float pos_y = 0.0f;
+  int32_t last_ticks = 0;
+  
+  printf("Waiting for CAN messages...\n");
+  uint32_t wait_start = HAL_GetTick();
+  while (currentTicks == 0 && (HAL_GetTick() - wait_start) < 5000) {
+      CAN_Process_Messages();
       HAL_Delay(100);
-
-      printf("Reached distance: %.2f cm, EncoderTicks: %ld\n", getDistance(), (long)getLocalEncoderTicks());
   }
-  */
-
+  
+  last_ticks = currentTicks;
+  printf("Initial CAN ticks: %ld, Yaw: %.2f deg\n", (long)currentTicks, currentYaw);
+  
+  // Define waypoints: A(30,0), B(30,10), C(30,40)
+  typedef struct {
+      float x;
+      float y;
+      char name;
+  } Waypoint;
+  
+  Waypoint waypoints[] = {
+      {30.0f, 0.0f, 'A'},
+      {30.0f, 10.0f, 'B'},
+      {30.0f, 40.0f, 'C'}
+  };
+  uint8_t num_waypoints = sizeof(waypoints) / sizeof(Waypoint);
+  uint8_t current_waypoint = 0;
+  
+  Motion_AcceptCoords(&motion, waypoints[current_waypoint].x, waypoints[current_waypoint].y);
+  printf("Moving to waypoint %c: (%.1f, %.1f) cm\n", 
+         waypoints[current_waypoint].name, 
+         waypoints[current_waypoint].x, 
+         waypoints[current_waypoint].y);
+  
+  HAL_Delay(500);
+  
+  uint32_t last_print = HAL_GetTick();
+  
   while (1)
   {
       CAN_Process_Messages();
-      float Yaw = getYaw();
-      int ticks = getTicks();
-
-      printf("Yaw: %.2f deg, Ticks: %d\n", Yaw, ticks);
-      HAL_Delay(100);
+      
+      int32_t current_ticks = currentTicks;
+      int32_t delta_ticks = current_ticks - last_ticks;
+      
+      if (delta_ticks != 0) {
+          float delta_distance = (float)delta_ticks / ticks_per_cm;
+          float yaw_rad = currentYaw * (M_PI / 180.0f);
+          
+          pos_x += delta_distance * cosf(yaw_rad);
+          pos_y += delta_distance * sinf(yaw_rad);
+          
+          last_ticks = current_ticks;
+      }
+      
+      if (!motion.has_target_point && current_waypoint < num_waypoints) {
+          HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_RESET);
+          
+          printf("\n*** Waypoint %c REACHED! *** Position: (%.2f, %.2f)\n", 
+                 waypoints[current_waypoint].name, pos_x, pos_y);
+          
+          uint32_t wait_start = HAL_GetTick();
+          while ((HAL_GetTick() - wait_start) < 1000) {
+              CAN_Process_Messages();
+              HAL_Delay(10);
+          }
+          
+          last_ticks = currentTicks;
+          current_waypoint++;
+          
+          if (current_waypoint < num_waypoints) {
+              Motion_AcceptCoords(&motion, waypoints[current_waypoint].x, waypoints[current_waypoint].y); // THIS FUNCTION MAKES THE CAR MOVE BASED ON COORDS
+              printf("Moving to waypoint %c: (%.1f, %.1f) cm\n", 
+                     waypoints[current_waypoint].name,
+                     waypoints[current_waypoint].x,
+                     waypoints[current_waypoint].y);
+              
+              HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_SET);
+          } else {
+              printf("*** ALL WAYPOINTS COMPLETED! ***\n");
+          }
+      }
+      
+      Motion_UpdateWithThrottle(&motion, pos_x, pos_y, currentYaw);
+      
+      if ((HAL_GetTick() - last_print) > 500) {
+          float dx = waypoints[current_waypoint < num_waypoints ? current_waypoint : num_waypoints-1].x - pos_x;
+          float dy = waypoints[current_waypoint < num_waypoints ? current_waypoint : num_waypoints-1].y - pos_y;
+          float dist_to_target = sqrtf(dx*dx + dy*dy);
+          printf("Pos: (%.2f, %.2f) | Yaw: %.2f | WP: %c | Dist: %.2f | HasTarget: %d | Ticks: %ld\n", 
+                 pos_x, pos_y, currentYaw, 
+                 waypoints[current_waypoint < num_waypoints ? current_waypoint : num_waypoints-1].name,
+                 dist_to_target, motion.has_target_point, (long)currentTicks);
+          last_print = HAL_GetTick();
+      }
+      
+      HAL_Delay(50);
   }
     /* USER CODE END WHILE */
 
@@ -690,6 +745,9 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, LD1_Pin|LD2_Pin, GPIO_PIN_RESET);
 
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_RESET);
+
   /*Configure GPIO pin : B1_Pin */
   GPIO_InitStruct.Pin = B1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
@@ -702,6 +760,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : FLAG_INDICATOR_Pin */
+  GPIO_InitStruct.Pin = FLAG_INDICATOR_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(FLAG_INDICATOR_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 

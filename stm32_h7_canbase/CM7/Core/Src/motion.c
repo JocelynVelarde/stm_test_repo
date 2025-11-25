@@ -141,16 +141,73 @@ void Motion_UpdateWithThrottle(Motion_t *m, float current_x, float current_y, fl
 {
     if (!m) return;
 
-    Motion_Update(m, current_x, current_y, current_yaw_deg);
-
-    Servo_SetAngleDegrees(m->servo_center_deg);
-    m->steering_deg = 0;
-
-    if (m->has_target_point) {
-        setEscSpeed_us(2000);
-    } else {
-        setEscSpeed_us(1500);
+    if (!m->has_target_point) {
+        stopCarEsc();
+        Servo_SetAngleDegrees(m->servo_center_deg);
+        m->steering_deg = 0;
+        return;
     }
+
+    float dx = m->target_x - current_x;
+    float dy = m->target_y - current_y;
+    float dist_cm = sqrtf(dx*dx + dy*dy);
+    
+    if (dist_cm <= 2.0f) {
+        m->has_target_point = 0;
+        stopCarEsc();
+        Servo_SetAngleDegrees(m->servo_center_deg);
+        m->steering_deg = 0;
+        return;
+    }
+    
+    float desired_yaw_deg = atan2f(dy, dx) * (180.0f / M_PI);
+    if (desired_yaw_deg < 0.0f) desired_yaw_deg += 360.0f;
+    
+    float cur360 = current_yaw_deg;
+    float des360 = desired_yaw_deg;
+    float error = des360 - cur360;
+    
+    while (error > 180.0f) error -= 360.0f;
+    while (error < -180.0f) error += 360.0f;
+    
+    uint32_t now = HAL_GetTick();
+    float dt = (now - m->pid_last_tick_ms) * 0.001f;
+    if (dt <= 0.0f) dt = 0.001f;
+    
+    m->pid_integrator += error * dt;
+    if (m->pid_integrator > 100.0f) m->pid_integrator = 100.0f;
+    if (m->pid_integrator < -100.0f) m->pid_integrator = -100.0f;
+    
+    float derivative = (error - m->pid_last_error) / dt;
+    float out = m->pid_kp * error + m->pid_ki * m->pid_integrator + m->pid_kd * derivative;
+    
+    if (out > 90.0f) out = 90.0f;
+    if (out < -90.0f) out = -90.0f;
+    
+    Motion_SetSteeringDeg(m, (int16_t)out);
+    
+    m->pid_last_error = error;
+    m->pid_last_tick_ms = now;
+    
+]    float speed = 0.0f;
+    float abs_err = fabsf(error);
+    
+    if (abs_err > 45.0f) {
+        speed = 10.0f;
+    } else if (abs_err > 20.0f) {
+        speed = 30.0f;
+    } else {
+        float k_dist = 2.0f;
+        speed = dist_cm * k_dist;
+        if (speed > 80.0f) speed = 80.0f;
+        if (speed < 20.0f) speed = 20.0f;
+    }
+
+    uint16_t esc_pulse = 1500 + (uint16_t)(speed * 5.0f);
+    if (esc_pulse > 2000) esc_pulse = 2000;
+    if (esc_pulse < 1500) esc_pulse = 1500;
+    
+    setEscSpeed_us(esc_pulse);
 }
 
 void Motion_Stop(Motion_t *m)
