@@ -15,7 +15,6 @@
   *
   ******************************************************************************
   */
-// THIS IS A COMMIT TEST
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
@@ -56,7 +55,6 @@
 FDCAN_HandleTypeDef hfdcan1;
 
 TIM_HandleTypeDef htim2;
-TIM_HandleTypeDef htim4;
 TIM_HandleTypeDef htim13;
 
 UART_HandleTypeDef huart3;
@@ -73,12 +71,6 @@ float currentYaw = 0.0f;
 // Ticks received via CAN
 volatile int32_t currentTicks = 0;
 
-// Constants for odometry
-float const wheel_diameter_cm = 6.3f;
-float const wheel_circumference_cm = (M_PI * wheel_diameter_cm);
-float const ticks_per_cm = (1500.0f / 267.0f); 
-float const ticks_per_rev = ticks_per_cm * wheel_circumference_cm;
-
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -88,12 +80,10 @@ static void MX_USART3_UART_Init(void);
 static void MX_FDCAN1_Init(void);
 static void MX_TIM13_Init(void);
 static void MX_TIM2_Init(void);
-static void MX_TIM4_Init(void);
 /* USER CODE BEGIN PFP */
 void CAN_Process_Messages(void);
 float getYaw(void);
 int32_t getTicks(void);
-float getDistance(void);
 float getCanDistance(void);
 
 // ESC control functions
@@ -155,24 +145,10 @@ float getYaw(void) {
     return currentYaw;
 }
 
-float getDistance(void) {
-  return getTicks()/ ticks_per_cm;
-}
-
 int32_t getTicks(void) {
   return currentTicks;
 }
 
-/* Get distance in cm from CAN ticks */
-float getCanDistance(void) {
-  return (float)currentTicks / ticks_per_cm;
-}
-
-  typedef struct {
-    float x;
-    float y;
-    char name;
-  } Waypoint;
 
 /* USER CODE END 0 */
 
@@ -186,9 +162,9 @@ int main(void)
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
-/* USER CODE BEGIN Boot_Mode_Sequence_0 */
-  int32_t timeout;
-/* USER CODE END Boot_Mode_Sequence_0 */
+	/* USER CODE BEGIN Boot_Mode_Sequence_0 */
+	  int32_t timeout;
+	/* USER CODE END Boot_Mode_Sequence_0 */
 
 /* USER CODE BEGIN Boot_Mode_Sequence_1 */
   /* Wait until CPU2 boots and enters in stop mode or timeout*/
@@ -238,85 +214,58 @@ int main(void)
   MX_FDCAN1_Init();
   MX_TIM13_Init();
   MX_TIM2_Init();
-  MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
   /* Start PWM for servo (TIM13) and ESC (TIM2) */
   HAL_TIM_PWM_Start(&htim13, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
 
-  Motion_t motion;
-  Motion_Init(&motion);
+  servo_write_deg(115);
 
-  stopCarEsc();
+  setEscSpeed_us(1500); 
   HAL_Delay(1000);
-
-  // __HAL_TIM_SET_COUNTER(&htim4, 0);
+  
+	#define TICKS_PER_METER  349.0f
+	#define TARGET_DISTANCE_M  1.0f
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
 
-  // Odometry variables
-  float pos_x = 0.0f;
-  float pos_y = 0.0f;
-  int32_t last_ticks = 0;
-  int32_t current_ticks = 0;
+  CAN_Process_Messages();
+  int32_t start_ticks = getTicks();
+  int32_t current_ticks = start_ticks;
+  int32_t delta_ticks = 0;
+  float current_distance_m = 0.0;
 
-  Waypoint waypoints[] = {
-    {30.0f, 0.0f, 'A'},
-    {30.0f, 70.0f, 'B'},
-    {70.0f, 70.0f, 'C'}
-  };
-  uint8_t num_waypoints = sizeof(waypoints) / sizeof(waypoints[0]);
-  uint8_t current_waypoint = 0;
+  printf("INICIO: Avanzando hacia %.2f metros...\n", TARGET_DISTANCE_M);
 
-  /* Start with the first waypoint */
-  if (num_waypoints > 0) {
-    Motion_AcceptCoords(&motion, waypoints[0].x, waypoints[0].y);
-    printf("Moving to waypoint %c: (%.1f, %.1f) cm\n", waypoints[0].name, waypoints[0].x, waypoints[0].y);
-  }
+  setEscSpeed_us(2000);
 
-  last_ticks = currentTicks;
-
-  while (1)
+  while (current_distance_m < TARGET_DISTANCE_M)
   {
-    CAN_Process_Messages();
-    float currentYaw = getYaw();
+      CAN_Process_Messages();
+      current_ticks = getTicks();
 
-    int32_t current_ticks = currentTicks;
-    int32_t delta_ticks = current_ticks - last_ticks;
+      delta_ticks = current_ticks - start_ticks;
+      if(delta_ticks < 0) delta_ticks = -delta_ticks;
 
-    if (delta_ticks != 0) {
-      float delta_distance = (float)delta_ticks / ticks_per_cm; /* cm */
-      float yaw_rad = currentYaw * (M_PI / 180.0f);
-
-      pos_x += delta_distance * cosf(yaw_rad);
-      pos_y += delta_distance * sinf(yaw_rad);
-
-      last_ticks = current_ticks;
-    }
-
-    Motion_UpdateWithThrottle(&motion, pos_x, pos_y, currentYaw);
-
-    if (!motion.has_target_point) {
-      printf("\n*** Waypoint %c REACHED! Position: (%.2f, %.2f) ***\n", waypoints[current_waypoint].name, pos_x, pos_y);
-
-      if (current_waypoint + 1 < num_waypoints) {
-        current_waypoint++;
-        Motion_AcceptCoords(&motion, waypoints[current_waypoint].x, waypoints[current_waypoint].y);
-        printf("Moving to waypoint %c...\n", waypoints[current_waypoint].name);
-        HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_SET);
-        HAL_Delay(100);
-        last_ticks = currentTicks;
-      } else {
-        printf("*** ALL WAYPOINTS COMPLETED! ***\n");
-        Motion_Stop(&motion);
-      }
-    }
-    HAL_Delay(50);
+      current_distance_m = (float)delta_ticks / TICKS_PER_METER;
   }
+
+  setEscSpeed_us(1500);
+
+  // 5. Reporte Final
+  printf("STOP. Meta: %.2f m | Real: %.4f m\n", TARGET_DISTANCE_M, current_distance_m);
+  printf("Ticks totales: %ld\n", delta_ticks);
+
+  // Bucle infinito para que no repita la prueba
+  while(1){
+    CAN_Process_Messages();
+  }
+  /* USER CODE END WHILE */
     /* USER CODE END WHILE */
+
     /* USER CODE BEGIN 3 */
   /* USER CODE END 3 */
 }
@@ -513,55 +462,6 @@ static void MX_TIM2_Init(void)
 
   /* USER CODE END TIM2_Init 2 */
   HAL_TIM_MspPostInit(&htim2);
-
-}
-
-/**
-  * @brief TIM4 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_TIM4_Init(void)
-{
-
-  /* USER CODE BEGIN TIM4_Init 0 */
-
-  /* USER CODE END TIM4_Init 0 */
-
-  TIM_Encoder_InitTypeDef sConfig = {0};
-  TIM_MasterConfigTypeDef sMasterConfig = {0};
-
-  /* USER CODE BEGIN TIM4_Init 1 */
-
-  /* USER CODE END TIM4_Init 1 */
-  htim4.Instance = TIM4;
-  htim4.Init.Prescaler = 0;
-  htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim4.Init.Period = 65535;
-  htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  sConfig.EncoderMode = TIM_ENCODERMODE_TI12;
-  sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
-  sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
-  sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
-  sConfig.IC1Filter = 0;
-  sConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
-  sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
-  sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
-  sConfig.IC2Filter = 0;
-  if (HAL_TIM_Encoder_Init(&htim4, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN TIM4_Init 2 */
-
-  /* USER CODE END TIM4_Init 2 */
 
 }
 
