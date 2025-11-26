@@ -84,7 +84,6 @@ static void MX_TIM2_Init(void);
 void CAN_Process_Messages(void);
 float getYaw(void);
 int32_t getTicks(void);
-float getCanDistance(void);
 
 // ESC control functions
 void setEscSpeed_us(uint16_t pulse_us);
@@ -223,48 +222,48 @@ int main(void)
 
   setEscSpeed_us(1500); 
   HAL_Delay(1000);
-  
-	#define TICKS_PER_METER  349.0f
-	#define TARGET_DISTANCE_M  1.0f
 
+	#define TICKS_PER_METER   613.95f
+  #define TARGET_DISTANCE_M 1.0f
   /* USER CODE END 2 */
 
+  /* Infinite loop */
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
 
   CAN_Process_Messages();
+  
+  // Guardamos ticks iniciales
   int32_t start_ticks = getTicks();
   int32_t current_ticks = start_ticks;
   int32_t delta_ticks = 0;
   float current_distance_m = 0.0;
 
-  printf("INICIO: Avanzando hacia %.2f metros...\n", TARGET_DISTANCE_M);
+  printf("INICIO: Avanzando %.2f metros...\r\n", TARGET_DISTANCE_M);
 
-  setEscSpeed_us(2000);
-
+  // Arrancar motor
+  setEscSpeed_us(1750);
+  
+  // Bucle de control de distancia
   while (current_distance_m < TARGET_DISTANCE_M)
   {
-      CAN_Process_Messages();
+      CAN_Process_Messages(); // Vital: seguir leyendo el CAN
       current_ticks = getTicks();
 
       delta_ticks = current_ticks - start_ticks;
-      if(delta_ticks < 0) delta_ticks = -delta_ticks;
+      if(delta_ticks < 0) delta_ticks = -delta_ticks; // Valor absoluto
 
       current_distance_m = (float)delta_ticks / TICKS_PER_METER;
   }
 
+  // Detener motor al llegar a la distancia
   setEscSpeed_us(1500);
+  printf("LLEGADA: Distancia final calculada: %.3f m\r\n", current_distance_m);
 
-  // 5. Reporte Final
-  printf("STOP. Meta: %.2f m | Real: %.4f m\n", TARGET_DISTANCE_M, current_distance_m);
-  printf("Ticks totales: %ld\n", delta_ticks);
-
-  // Bucle infinito para que no repita la prueba
   while(1){
     CAN_Process_Messages();
   }
   /* USER CODE END WHILE */
-    /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
   /* USER CODE END 3 */
