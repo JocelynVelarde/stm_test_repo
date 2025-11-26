@@ -9,10 +9,10 @@ extern TIM_HandleTypeDef htim13;
 
 #define SERVO_MOVE_MIN_MS   10
 
-// Constants in degrees
-#define CENTER 120
+// Constants in degrees THE LEFT AND RIGHT MUST BE THIS SINCE THE ROBOT GET STUCK
 #define LEFT 0
-#define RIGHT 180
+#define CENTER 115
+#define RIGHT 165
 
 static uint32_t last_move_tick = 0U;
 

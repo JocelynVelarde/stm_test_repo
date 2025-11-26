@@ -26,7 +26,7 @@ void Motion_Init(Motion_t *m)
     m->pid_last_tick_ms = HAL_GetTick();
     
     stopCarEsc();
-    m->servo_center_deg = 120.0f;
+    m->servo_center_deg = 115.0f;
     Servo_SetAngleDegrees(m->servo_center_deg);
 }
 
@@ -66,77 +66,6 @@ void Motion_AcceptCoords(Motion_t *m, float x_cm, float y_cm)
     m->has_target_point = 1;
 }
 
-void Motion_Update(Motion_t *m, float current_x, float current_y, float current_yaw_deg)
-{
-    if (!m) return;
-
-    float desired_yaw_deg = m->target_yaw_deg;
-    float dist_cm = 0.0f;
-    if (m->has_target_point) {
-        float dx = m->target_x - current_x;
-        float dy = m->target_y - current_y;
-        dist_cm = sqrtf(dx*dx + dy*dy);
-        if (dist_cm < 1e-6f) {
-            desired_yaw_deg = current_yaw_deg;
-        } else {
-            desired_yaw_deg = atan2f(dy, dx) * (180.0f / M_PI);
-            if (desired_yaw_deg < 0.0f) desired_yaw_deg += 360.0f;
-        }
-    }
-
-    float cur360 = current_yaw_deg;
-    float des360 = desired_yaw_deg;
-    float error = des360 - cur360;
-
-    while (error > 180.0f) error -= 360.0f;
-    while (error < -180.0f) error += 360.0f;
-
-    uint32_t now = HAL_GetTick();
-    float dt = (now - m->pid_last_tick_ms) * 0.001f; /* seconds */
-    if (dt <= 0.0f) dt = 0.001f;
-
-    m->pid_integrator += error * dt;
-    if (m->pid_integrator > 100.0f) m->pid_integrator = 100.0f;
-    if (m->pid_integrator < -100.0f) m->pid_integrator = -100.0f;
-
-    float derivative = (error - m->pid_last_error) / dt;
-    float out = m->pid_kp * error + m->pid_ki * m->pid_integrator + m->pid_kd * derivative;
-
-    if (out > 90.0f) out = 90.0f;
-    if (out < -90.0f) out = -90.0f;
-
-    Motion_SetSteeringDeg(m, (int16_t)out);
-
-    m->pid_last_error = error;
-    m->pid_last_tick_ms = now;
-
-    if (m->has_target_point) {
-        float dx = m->target_x - current_x;
-        float dy = m->target_y - current_y;
-        float remaining_dist = sqrtf(dx*dx + dy*dy);
-        
-        if (remaining_dist <= 2.0f) {
-            Motion_Stop(m);
-            m->has_target_point = 0;
-            return;
-        }
-
-        float speed = 0.0f;
-        float k_dist = 0.5f;
-        speed = dist_cm * k_dist;
-        if (speed > 100.0f) speed = 100.0f;
-        if (speed < 15.0f) speed = 15.0f;
-
-        float abs_err = fabsf(error);
-        if (abs_err > 45.0f) {
-            speed = 10.0f;
-        } else if (abs_err > 20.0f) {
-            speed *= 0.5f;
-            if (speed < 10.0f) speed = 10.0f;
-        }
-    }
-}
-
 void Motion_UpdateWithThrottle(Motion_t *m, float current_x, float current_y, float current_yaw_deg)
 {
     if (!m) return;
@@ -152,7 +81,7 @@ void Motion_UpdateWithThrottle(Motion_t *m, float current_x, float current_y, fl
     float dy = m->target_y - current_y;
     float dist_cm = sqrtf(dx*dx + dy*dy);
     
-    if (dist_cm <= 2.0f) {
+    if (dist_cm <= 5.0f) {
         m->has_target_point = 0;
         stopCarEsc();
         Servo_SetAngleDegrees(m->servo_center_deg);
@@ -163,6 +92,7 @@ void Motion_UpdateWithThrottle(Motion_t *m, float current_x, float current_y, fl
     float desired_yaw_deg = atan2f(dy, dx) * (180.0f / M_PI);
     if (desired_yaw_deg < 0.0f) desired_yaw_deg += 360.0f;
     
+    // Calculate heading error
     float cur360 = current_yaw_deg;
     float des360 = desired_yaw_deg;
     float error = des360 - cur360;
@@ -170,13 +100,14 @@ void Motion_UpdateWithThrottle(Motion_t *m, float current_x, float current_y, fl
     while (error > 180.0f) error -= 360.0f;
     while (error < -180.0f) error += 360.0f;
     
+    // PID control for steering
     uint32_t now = HAL_GetTick();
     float dt = (now - m->pid_last_tick_ms) * 0.001f;
     if (dt <= 0.0f) dt = 0.001f;
     
     m->pid_integrator += error * dt;
-    if (m->pid_integrator > 100.0f) m->pid_integrator = 100.0f;
-    if (m->pid_integrator < -100.0f) m->pid_integrator = -100.0f;
+    if (m->pid_integrator > 50.0f) m->pid_integrator = 50.0f;
+    if (m->pid_integrator < -50.0f) m->pid_integrator = -50.0f;
     
     float derivative = (error - m->pid_last_error) / dt;
     float out = m->pid_kp * error + m->pid_ki * m->pid_integrator + m->pid_kd * derivative;
@@ -189,11 +120,12 @@ void Motion_UpdateWithThrottle(Motion_t *m, float current_x, float current_y, fl
     m->pid_last_error = error;
     m->pid_last_tick_ms = now;
     
-]    float speed = 0.0f;
+    float speed = 0.0f;
     float abs_err = fabsf(error);
+    float MIN_TURN_SPEED = 100.0f;
     
     if (abs_err > 45.0f) {
-        speed = 10.0f;
+        speed = MIN_TURN_SPEED;
     } else if (abs_err > 20.0f) {
         speed = 30.0f;
     } else {
@@ -202,7 +134,7 @@ void Motion_UpdateWithThrottle(Motion_t *m, float current_x, float current_y, fl
         if (speed > 80.0f) speed = 80.0f;
         if (speed < 20.0f) speed = 20.0f;
     }
-
+    
     uint16_t esc_pulse = 1500 + (uint16_t)(speed * 5.0f);
     if (esc_pulse > 2000) esc_pulse = 2000;
     if (esc_pulse < 1500) esc_pulse = 1500;

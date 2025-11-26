@@ -72,8 +72,6 @@ uint8_t RxData[8];
 float currentYaw = 0.0f;
 // Ticks received via CAN
 volatile int32_t currentTicks = 0;
-// Previous TIM4 counter value for local encoder delta calculation
-volatile uint16_t prev_tim4_cnt = 0;
 
 // Constants for odometry
 float const wheel_diameter_cm = 6.3f;
@@ -103,19 +101,12 @@ void setEscSpeed_us(uint16_t pulse_us);
 void stopCarEsc(void);                 
 static uint8_t esc_invert = 0;
 
-/* Encoder tracking variables */
-volatile int32_t encoder_tick_count = 0;
-
 static inline uint16_t esc_apply_dir(uint16_t us)
 {
     if (us < 1000) us = 1000;
     if (us > 2000) us = 2000;
     return esc_invert ? (uint16_t)(3000 - us) : us;
 }
-
-/* Encoder helper prototypes */
-void Encoder_Update(void);
-int32_t getLocalEncoderTicks(void);
 
 /* USER CODE END PFP */
 
@@ -165,7 +156,7 @@ float getYaw(void) {
 }
 
 float getDistance(void) {
-  return (float)getLocalEncoderTicks() / ticks_per_cm;
+  return getTicks()/ ticks_per_cm;
 }
 
 int32_t getTicks(void) {
@@ -177,18 +168,11 @@ float getCanDistance(void) {
   return (float)currentTicks / ticks_per_cm;
 }
 
-void Encoder_Update(void)
-{
-    uint16_t cnt = (uint16_t)__HAL_TIM_GET_COUNTER(&htim4);
-    int16_t delta = (int16_t)(cnt - prev_tim4_cnt);
-    encoder_tick_count += (int32_t)delta;
-    prev_tim4_cnt = cnt;
-}
-
-int32_t getLocalEncoderTicks(void)
-{
-    return encoder_tick_count;
-}
+  typedef struct {
+    float x;
+    float y;
+    char name;
+  } Waypoint;
 
 /* USER CODE END 0 */
 
@@ -260,7 +244,6 @@ int main(void)
   HAL_TIM_PWM_Start(&htim13, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
 
-
   Motion_t motion;
   Motion_Init(&motion);
 
@@ -278,106 +261,63 @@ int main(void)
   float pos_x = 0.0f;
   float pos_y = 0.0f;
   int32_t last_ticks = 0;
-  
-  printf("Waiting for CAN messages...\n");
-  uint32_t wait_start = HAL_GetTick();
-  while (currentTicks == 0 && (HAL_GetTick() - wait_start) < 5000) {
-      CAN_Process_Messages();
-      HAL_Delay(100);
-  }
-  
-  last_ticks = currentTicks;
-  printf("Initial CAN ticks: %ld, Yaw: %.2f deg\n", (long)currentTicks, currentYaw);
-  
-  // Define waypoints: A(30,0), B(30,10), C(30,40)
-  typedef struct {
-      float x;
-      float y;
-      char name;
-  } Waypoint;
-  
+  int32_t current_ticks = 0;
+
   Waypoint waypoints[] = {
-      {30.0f, 0.0f, 'A'},
-      {30.0f, 10.0f, 'B'},
-      {30.0f, 40.0f, 'C'}
+    {30.0f, 0.0f, 'A'},
+    {30.0f, 70.0f, 'B'},
+    {70.0f, 70.0f, 'C'}
   };
-  uint8_t num_waypoints = sizeof(waypoints) / sizeof(Waypoint);
+  uint8_t num_waypoints = sizeof(waypoints) / sizeof(waypoints[0]);
   uint8_t current_waypoint = 0;
-  
-  Motion_AcceptCoords(&motion, waypoints[current_waypoint].x, waypoints[current_waypoint].y);
-  printf("Moving to waypoint %c: (%.1f, %.1f) cm\n", 
-         waypoints[current_waypoint].name, 
-         waypoints[current_waypoint].x, 
-         waypoints[current_waypoint].y);
-  
-  HAL_Delay(500);
-  
-  uint32_t last_print = HAL_GetTick();
-  
+
+  /* Start with the first waypoint */
+  if (num_waypoints > 0) {
+    Motion_AcceptCoords(&motion, waypoints[0].x, waypoints[0].y);
+    printf("Moving to waypoint %c: (%.1f, %.1f) cm\n", waypoints[0].name, waypoints[0].x, waypoints[0].y);
+  }
+
+  last_ticks = currentTicks;
+
   while (1)
   {
-      CAN_Process_Messages();
-      
-      int32_t current_ticks = currentTicks;
-      int32_t delta_ticks = current_ticks - last_ticks;
-      
-      if (delta_ticks != 0) {
-          float delta_distance = (float)delta_ticks / ticks_per_cm;
-          float yaw_rad = currentYaw * (M_PI / 180.0f);
-          
-          pos_x += delta_distance * cosf(yaw_rad);
-          pos_y += delta_distance * sinf(yaw_rad);
-          
-          last_ticks = current_ticks;
+    CAN_Process_Messages();
+    float currentYaw = getYaw();
+
+    int32_t current_ticks = currentTicks;
+    int32_t delta_ticks = current_ticks - last_ticks;
+
+    if (delta_ticks != 0) {
+      float delta_distance = (float)delta_ticks / ticks_per_cm; /* cm */
+      float yaw_rad = currentYaw * (M_PI / 180.0f);
+
+      pos_x += delta_distance * cosf(yaw_rad);
+      pos_y += delta_distance * sinf(yaw_rad);
+
+      last_ticks = current_ticks;
+    }
+
+    Motion_UpdateWithThrottle(&motion, pos_x, pos_y, currentYaw);
+
+    if (!motion.has_target_point) {
+      printf("\n*** Waypoint %c REACHED! Position: (%.2f, %.2f) ***\n", waypoints[current_waypoint].name, pos_x, pos_y);
+
+      if (current_waypoint + 1 < num_waypoints) {
+        current_waypoint++;
+        Motion_AcceptCoords(&motion, waypoints[current_waypoint].x, waypoints[current_waypoint].y);
+        printf("Moving to waypoint %c...\n", waypoints[current_waypoint].name);
+        HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_SET);
+        HAL_Delay(100);
+        last_ticks = currentTicks;
+      } else {
+        printf("*** ALL WAYPOINTS COMPLETED! ***\n");
+        Motion_Stop(&motion);
       }
-      
-      if (!motion.has_target_point && current_waypoint < num_waypoints) {
-          HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_RESET);
-          
-          printf("\n*** Waypoint %c REACHED! *** Position: (%.2f, %.2f)\n", 
-                 waypoints[current_waypoint].name, pos_x, pos_y);
-          
-          uint32_t wait_start = HAL_GetTick();
-          while ((HAL_GetTick() - wait_start) < 1000) {
-              CAN_Process_Messages();
-              HAL_Delay(10);
-          }
-          
-          last_ticks = currentTicks;
-          current_waypoint++;
-          
-          if (current_waypoint < num_waypoints) {
-              Motion_AcceptCoords(&motion, waypoints[current_waypoint].x, waypoints[current_waypoint].y); // THIS FUNCTION MAKES THE CAR MOVE BASED ON COORDS
-              printf("Moving to waypoint %c: (%.1f, %.1f) cm\n", 
-                     waypoints[current_waypoint].name,
-                     waypoints[current_waypoint].x,
-                     waypoints[current_waypoint].y);
-              
-              HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_SET);
-          } else {
-              printf("*** ALL WAYPOINTS COMPLETED! ***\n");
-          }
-      }
-      
-      Motion_UpdateWithThrottle(&motion, pos_x, pos_y, currentYaw);
-      
-      if ((HAL_GetTick() - last_print) > 500) {
-          float dx = waypoints[current_waypoint < num_waypoints ? current_waypoint : num_waypoints-1].x - pos_x;
-          float dy = waypoints[current_waypoint < num_waypoints ? current_waypoint : num_waypoints-1].y - pos_y;
-          float dist_to_target = sqrtf(dx*dx + dy*dy);
-          printf("Pos: (%.2f, %.2f) | Yaw: %.2f | WP: %c | Dist: %.2f | HasTarget: %d | Ticks: %ld\n", 
-                 pos_x, pos_y, currentYaw, 
-                 waypoints[current_waypoint < num_waypoints ? current_waypoint : num_waypoints-1].name,
-                 dist_to_target, motion.has_target_point, (long)currentTicks);
-          last_print = HAL_GetTick();
-      }
-      
-      HAL_Delay(50);
+    }
+    HAL_Delay(50);
   }
     /* USER CODE END WHILE */
-
     /* USER CODE BEGIN 3 */
-
   /* USER CODE END 3 */
 }
 
@@ -620,10 +560,6 @@ static void MX_TIM4_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN TIM4_Init 2 */
-  // HAL_TIM_Encoder_Start(&htim4,TIM_CHANNEL_ALL);
-
-  /* Initialize previous TIM4 counter to current value to avoid a large first delta */
-  // prev_tim4_cnt = (uint16_t)__HAL_TIM_GET_COUNTER(&htim4);
 
   /* USER CODE END TIM4_Init 2 */
 
