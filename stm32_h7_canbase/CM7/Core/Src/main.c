@@ -93,7 +93,7 @@ int32_t getTicks(void);
 // ESC control functions
 void setEscSpeed_us(uint16_t pulse_us);
 void stopCarEsc(void);                 
-static uint8_t esc_invert = 0;
+static uint8_t esc_invert = 1;
 
 static inline uint16_t esc_apply_dir(uint16_t us)
 {
@@ -219,41 +219,94 @@ int main(void)
   MX_TIM13_Init();
   MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
-  HAL_TIM_PWM_Start(&htim13, TIM_CHANNEL_1);
-  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim13, TIM_CHANNEL_1); // Servo
+  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);  // ESC
 
-  servo_write_deg(115);
-  setEscSpeed_us(1500); 
+  setEscSpeed_us(1500); // Neutral signal
   HAL_Delay(1000);
+
+  #define TICKS_PER_CM    4.58f
+  #define DEG_TO_RAD      0.01745329f
+  #define TARGET_THRESHOLD 4.0f
 
   Motion_Init(&robotMotion);
 
-  Motion_AcceptCoords(&robotMotion, 50.0f, 0.0f);
-
-  #define TICKS_PER_CM    6.14f
-  #define DEG_TO_RAD      0.01745329f
-  
   int32_t last_ticks = getTicks();
   int32_t current_ticks = 0;
-  
+
+  typedef struct {
+    float x;
+    float y;
+  } Waypoint_t;
+
+  Waypoint_t path[] = {
+      {50.0f, 0.0f},
+      {100.0f, 0.0f},
+      {200.0f, 0.0f}
+  };
+
+  int total_waypoints = sizeof(path) / sizeof(path[0]);
+  int current_wp_idx = 0;
+  uint8_t finished_path = 0;
+
+  Motion_AcceptCoords(&robotMotion, path[current_wp_idx].x, path[current_wp_idx].y);
   /* USER CODE END 2 */
 
   /* USER CODE BEGIN WHILE */
   while (1)
   {
       CAN_Process_Messages();
-      
+
       current_ticks = getTicks();
       int32_t delta = current_ticks - last_ticks;
       last_ticks = current_ticks;
-      
+
       if (delta != 0) {
           float dist_cm = (float)delta / TICKS_PER_CM;
+
           Global_Robot_X += dist_cm * cosf(Global_Robot_Yaw * DEG_TO_RAD);
           Global_Robot_Y += dist_cm * sinf(Global_Robot_Yaw * DEG_TO_RAD);
       }
 
       Motion_Update(&robotMotion, Global_Robot_X, Global_Robot_Y, Global_Robot_Yaw);
+
+      if (!finished_path)
+      {
+    	  float dist_to_target = path[current_wp_idx].x - Global_Robot_X;
+    	  printf("DISTANCIA:%f\r\n ", dist_to_target);
+          /*float dx = path[current_wp_idx].x - Global_Robot_X;
+          float dy = path[current_wp_idx].y - Global_Robot_Y;
+          float dist_sq = (dx * dx) + (dy * dy);
+          float threshold_sq = TARGET_THRESHOLD * TARGET_THRESHOLD;*/
+
+          if (dist_to_target < 4.0f)
+          {
+        	  setEscSpeed_us(1500);
+              HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_SET);
+
+              HAL_Delay(3000);
+
+              HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_RESET);
+              printf("DISTANCIA antes del erase: %f\r\n", dist_to_target);
+              CAN_Process_Messages(); // Clear buffer
+              last_ticks = getTicks();
+              printf("DISTANCIA DESPUES del erase: %f\r\n", dist_to_target);
+
+              current_wp_idx++;
+
+              if (current_wp_idx < total_waypoints)
+              {
+                  Motion_AcceptCoords(&robotMotion, path[current_wp_idx].x, path[current_wp_idx].y);
+              }
+              else
+              {
+                  finished_path = 1;
+                  /*setEscSpeed_us(1500);*/
+                  Motion_Stop(&robotMotion);
+                  //HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_RESET);
+              }
+          }
+      }
       HAL_Delay(20);
   }
   /* USER CODE END WHILE */

@@ -29,4 +29,5 @@ void setEscSpeed_us(uint16_t pulse_us)
 void stopCarEsc(void)
 {
     setEscSpeed_us(1500);
+    HAL_Delay(500);
 }
