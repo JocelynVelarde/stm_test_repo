@@ -233,7 +233,6 @@ int main(void)
 
   CAN_Process_Messages();
   
-  // Guardamos ticks iniciales
   int32_t start_ticks = getTicks();
   int32_t current_ticks = start_ticks;
   int32_t delta_ticks = 0;

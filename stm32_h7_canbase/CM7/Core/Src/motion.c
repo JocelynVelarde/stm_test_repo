@@ -2,151 +2,101 @@
 #include "esc.h"
 #include "servo.h"
 #include <math.h>
-#include "main.h" /* for HAL_GetTick */
+#include "main.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846f
 #endif
 
+#define SERVO_MAX_DEG 160.0f
+#define SERVO_MIN_DEG 0.0f
+
 void Motion_Init(Motion_t *m)
 {
     if (!m) return;
-    m->steering_deg = 0;
-    m->target_x = 0.0f;
-    m->target_y = 0.0f;
-    m->has_target_point = 0;
-    m->target_yaw_deg = 0.0f;
 
-    /* PID*/
-    m->pid_kp = 20.0f;
-    m->pid_ki = 0.01f;
-    m->pid_kd = 0.1f;
-    m->pid_integrator = 0.0f;
-    m->pid_last_error = 0.0f;
-    m->pid_last_tick_ms = HAL_GetTick();
+    m->target_x = 0; 
+    m->target_y = 0; 
+    m->has_target_point = 0;
     
+    m->Kp = 1.2f;  
+    m->Ki = 0.0f;  
+    m->Kd = 0.1f;  
+
+    m->prev_error = 0;
+    m->integral_error = 0;
+    m->last_time_ms = HAL_GetTick();
+
     stopCarEsc();
     m->servo_center_deg = 115.0f;
     Servo_SetAngleDegrees(m->servo_center_deg);
 }
 
-void Motion_SetSteeringDeg(Motion_t *m, int16_t deg)
+void Motion_AcceptCoords(Motion_t *m, float x, float y)
 {
-    if (!m) return;
-    if (deg > 90) deg = 90;
-    if (deg < -90) deg = -90;
-    if (m->steering_deg == deg) return;
-    m->steering_deg = deg;
-    float mapped = (float)deg;
-    float servo_deg = m->servo_center_deg + mapped;
-    Servo_SetAngleDegrees(servo_deg);
-}
-
-void Motion_SetServoCenter(Motion_t *m, float center_deg)
-{
-    if (!m) return;
-    m->servo_center_deg = center_deg;
-    Servo_SetAngleDegrees(center_deg);
-}
-
-void Motion_SetPIDParams(Motion_t *m, float kp, float ki, float kd)
-{
-    if (!m) return;
-    m->pid_kp = kp;
-    m->pid_ki = ki;
-    m->pid_kd = kd;
-}
-
-void Motion_AcceptCoords(Motion_t *m, float x_cm, float y_cm)
-{
-    if (!m) return;
-
-    m->target_x = x_cm;
-    m->target_y = y_cm;
+    m->target_x = x;
+    m->target_y = y;
     m->has_target_point = 1;
-}
-
-void Motion_UpdateWithThrottle(Motion_t *m, float current_x, float current_y, float current_yaw_deg)
-{
-    if (!m) return;
-
-    if (!m->has_target_point) {
-        stopCarEsc();
-        Servo_SetAngleDegrees(m->servo_center_deg);
-        m->steering_deg = 0;
-        return;
-    }
-
-    float dx = m->target_x - current_x;
-    float dy = m->target_y - current_y;
-    float dist_cm = sqrtf(dx*dx + dy*dy);
-    
-    if (dist_cm <= 5.0f) {
-        m->has_target_point = 0;
-        stopCarEsc();
-        Servo_SetAngleDegrees(m->servo_center_deg);
-        m->steering_deg = 0;
-        return;
-    }
-    
-    float desired_yaw_deg = atan2f(dy, dx) * (180.0f / M_PI);
-    if (desired_yaw_deg < 0.0f) desired_yaw_deg += 360.0f;
-    
-    // Calculate heading error
-    float cur360 = current_yaw_deg;
-    float des360 = desired_yaw_deg;
-    float error = des360 - cur360;
-    
-    while (error > 180.0f) error -= 360.0f;
-    while (error < -180.0f) error += 360.0f;
-    
-    // PID control for steering
-    uint32_t now = HAL_GetTick();
-    float dt = (now - m->pid_last_tick_ms) * 0.001f;
-    if (dt <= 0.0f) dt = 0.001f;
-    
-    m->pid_integrator += error * dt;
-    if (m->pid_integrator > 50.0f) m->pid_integrator = 50.0f;
-    if (m->pid_integrator < -50.0f) m->pid_integrator = -50.0f;
-    
-    float derivative = (error - m->pid_last_error) / dt;
-    float out = m->pid_kp * error + m->pid_ki * m->pid_integrator + m->pid_kd * derivative;
-    
-    if (out > 90.0f) out = 90.0f;
-    if (out < -90.0f) out = -90.0f;
-    
-    Motion_SetSteeringDeg(m, (int16_t)out);
-    
-    m->pid_last_error = error;
-    m->pid_last_tick_ms = now;
-    
-    float speed = 0.0f;
-    float abs_err = fabsf(error);
-    float MIN_TURN_SPEED = 100.0f;
-    
-    if (abs_err > 45.0f) {
-        speed = MIN_TURN_SPEED;
-    } else if (abs_err > 20.0f) {
-        speed = 30.0f;
-    } else {
-        float k_dist = 2.0f;
-        speed = dist_cm * k_dist;
-        if (speed > 80.0f) speed = 80.0f;
-        if (speed < 20.0f) speed = 20.0f;
-    }
-    
-    uint16_t esc_pulse = 1500 + (uint16_t)(speed * 5.0f);
-    if (esc_pulse > 2000) esc_pulse = 2000;
-    if (esc_pulse < 1500) esc_pulse = 1500;
-    
-    setEscSpeed_us(esc_pulse);
+    m->prev_error = 0.0f;
+    m->integral_error = 0.0f;
+    m->last_time_ms = HAL_GetTick();
 }
 
 void Motion_Stop(Motion_t *m)
 {
-    if (!m) return;
     m->has_target_point = 0;
-    stopCarEsc();
+    setEscSpeed_us(1500); 
     Servo_SetAngleDegrees(m->servo_center_deg);
-    m->steering_deg = 0;
+}
+
+void Motion_Update(Motion_t *m, float current_x, float current_y, float current_yaw)
+{
+    if (!m || !m->has_target_point) {
+        setEscSpeed_us(1500);
+    }
+
+    float dx = m->target_x - current_x;
+    float dy = m->target_y - current_y;
+    float dist = sqrtf(dx*dx + dy*dy);
+
+    if (dist <= 0.10f) {
+        Motion_Stop(m);
+        return;
+    }
+
+    float desired_yaw = atan2f(dy, dx) * (180.0f / M_PI);
+    
+    float error = desired_yaw - current_yaw;
+
+    if (error > 180.0f)  error -= 360.0f;
+    if (error < -180.0f) error += 360.0f;
+
+    uint32_t now = HAL_GetTick();
+    float dt = (now - m->last_time_ms) / 1000.0f; 
+    if (dt <= 0.0f) dt = 0.001f; 
+
+    float P = m->Kp * error;
+
+    m->integral_error += error * dt;
+    float I = m->Ki * m->integral_error;
+
+    float D = m->Kd * (error - m->prev_error) / dt;
+
+    float pid_output = P + I + D;
+
+    m->prev_error = error;
+    m->last_time_ms = now;
+
+    float final_servo_angle = m->servo_center_deg + pid_output;
+
+    if (final_servo_angle > SERVO_MAX_DEG) final_servo_angle = SERVO_MAX_DEG;
+    if (final_servo_angle < SERVO_MIN_DEG) final_servo_angle = SERVO_MIN_DEG;
+
+    Servo_SetAngleDegrees(final_servo_angle);
+
+    if (fabsf(error) > 30.0f) {
+         setEscSpeed_us(1600); 
+    } else {
+         setEscSpeed_us(1750);
+    }
 }

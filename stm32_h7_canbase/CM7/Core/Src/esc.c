@@ -28,22 +28,5 @@ void setEscSpeed_us(uint16_t pulse_us)
 
 void stopCarEsc(void)
 {
-    setEscSpeed_us((uint16_t)ESC_NEUTRAL_US);
-}
-
-static uint8_t esc_invert = 0;
-
-uint16_t esc_apply_dir(uint16_t us)
-{
-    if (us < (uint16_t)ESC_MIN_US) us = (uint16_t)ESC_MIN_US;
-    if (us > (uint16_t)ESC_MAX_US) us = (uint16_t)ESC_MAX_US;
-    if (esc_invert) {
-        return (uint16_t)(3000U - (uint32_t)us);
-    }
-    return us;
-}
-
-void Esc_SetInvert(uint8_t invert)
-{
-    esc_invert = invert ? 1U : 0U;
+    setEscSpeed_us(1500);
 }
