@@ -66,6 +66,11 @@ FDCAN_RxHeaderTypeDef RxHeader;
 uint8_t TxData[8] = {0x10, 0x34, 0x54, 0x76, 0x98, 0x00, 0x11, 0x22};
 uint8_t RxData[8];
 
+Motion_t robotMotion;
+float Global_Robot_X = 0.0f;
+float Global_Robot_Y = 0.0f;
+float Global_Robot_Yaw = 0.0f;
+
 // Variables from the ESP32s
 float currentYaw = 0.0f;
 // Ticks received via CAN
@@ -214,57 +219,45 @@ int main(void)
   MX_TIM13_Init();
   MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
-  /* Start PWM for servo (TIM13) and ESC (TIM2) */
   HAL_TIM_PWM_Start(&htim13, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
 
   servo_write_deg(115);
-
   setEscSpeed_us(1500); 
   HAL_Delay(1000);
 
-	#define TICKS_PER_METER   613.95f
-  #define TARGET_DISTANCE_M 1.0f
+  Motion_Init(&robotMotion);
+
+  Motion_AcceptCoords(&robotMotion, 50.0f, 0.0f);
+
+  #define TICKS_PER_CM    6.14f
+  #define DEG_TO_RAD      0.01745329f
+  
+  int32_t last_ticks = getTicks();
+  int32_t current_ticks = 0;
+  
   /* USER CODE END 2 */
 
-  /* Infinite loop */
-  /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-
-  CAN_Process_Messages();
-  
-  int32_t start_ticks = getTicks();
-  int32_t current_ticks = start_ticks;
-  int32_t delta_ticks = 0;
-  float current_distance_m = 0.0;
-
-  printf("INICIO: Avanzando %.2f metros...\r\n", TARGET_DISTANCE_M);
-
-  // Arrancar motor
-  setEscSpeed_us(1750);
-  
-  // Bucle de control de distancia
-  while (current_distance_m < TARGET_DISTANCE_M)
+  while (1)
   {
-      CAN_Process_Messages(); // Vital: seguir leyendo el CAN
+      CAN_Process_Messages();
+      
       current_ticks = getTicks();
+      int32_t delta = current_ticks - last_ticks;
+      last_ticks = current_ticks;
+      
+      if (delta != 0) {
+          float dist_cm = (float)delta / TICKS_PER_CM;
+          Global_Robot_X += dist_cm * cosf(Global_Robot_Yaw * DEG_TO_RAD);
+          Global_Robot_Y += dist_cm * sinf(Global_Robot_Yaw * DEG_TO_RAD);
+      }
 
-      delta_ticks = current_ticks - start_ticks;
-      if(delta_ticks < 0) delta_ticks = -delta_ticks; // Valor absoluto
-
-      current_distance_m = (float)delta_ticks / TICKS_PER_METER;
-  }
-
-  // Detener motor al llegar a la distancia
-  setEscSpeed_us(1500);
-  printf("LLEGADA: Distancia final calculada: %.3f m\r\n", current_distance_m);
-
-  while(1){
-    CAN_Process_Messages();
+      Motion_Update(&robotMotion, Global_Robot_X, Global_Robot_Y, Global_Robot_Yaw);
+      HAL_Delay(20);
   }
   /* USER CODE END WHILE */
-
-    /* USER CODE BEGIN 3 */
+  /* USER CODE BEGIN 3 */
   /* USER CODE END 3 */
 }
 

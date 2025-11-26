@@ -59,7 +59,7 @@ void Motion_Update(Motion_t *m, float current_x, float current_y, float current_
     float dy = m->target_y - current_y;
     float dist = sqrtf(dx*dx + dy*dy);
 
-    if (dist <= 0.10f) {
+    if (dist <= 2.5f) {
         Motion_Stop(m);
         return;
     }
