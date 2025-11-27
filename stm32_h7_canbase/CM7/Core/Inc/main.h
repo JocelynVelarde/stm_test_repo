@@ -69,14 +69,12 @@ void Error_Handler(void);
 #define STLINK_RX_GPIO_Port GPIOD
 #define STLINK_TX_Pin GPIO_PIN_9
 #define STLINK_TX_GPIO_Port GPIOD
+#define FLAG_INDICATOR_Pin GPIO_PIN_8
+#define FLAG_INDICATOR_GPIO_Port GPIOC
 #define FDCAN1_RX_Pin GPIO_PIN_0
 #define FDCAN1_RX_GPIO_Port GPIOD
 #define FDCAN1_TX_Pin GPIO_PIN_1
 #define FDCAN1_TX_GPIO_Port GPIOD
-#define ENC_A_Pin GPIO_PIN_6
-#define ENC_A_GPIO_Port GPIOB
-#define ENC_B_Pin GPIO_PIN_7
-#define ENC_B_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 

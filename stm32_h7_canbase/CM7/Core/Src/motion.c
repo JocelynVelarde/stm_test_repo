@@ -25,7 +25,7 @@ void Motion_Init(Motion_t *m)
 
     m->prev_error = 0;
     m->integral_error = 0;
-    m->last_time_ms = HAL_GetTick();
+    // m->last_time_ms = HAL_GetTick(); // REMOVED
 
     stopCarEsc();
     m->servo_center_deg = 115.0f;
@@ -39,7 +39,7 @@ void Motion_AcceptCoords(Motion_t *m, float x, float y)
     m->has_target_point = 1;
     m->prev_error = 0.0f;
     m->integral_error = 0.0f;
-    m->last_time_ms = HAL_GetTick();
+    // m->last_time_ms = HAL_GetTick(); // REMOVED
 }
 
 void Motion_Stop(Motion_t *m)
@@ -49,10 +49,12 @@ void Motion_Stop(Motion_t *m)
     Servo_SetAngleDegrees(m->servo_center_deg);
 }
 
-void Motion_Update(Motion_t *m, float current_x, float current_y, float current_yaw)
+// UPDATED: Now accepts 'dt' (delta time in seconds)
+void Motion_Update(Motion_t *m, float current_x, float current_y, float current_yaw, float dt)
 {
     if (!m || !m->has_target_point) {
         setEscSpeed_us(1500);
+        return; // Added return safety
     }
 
     float dx = m->target_x - current_x;
@@ -71,9 +73,10 @@ void Motion_Update(Motion_t *m, float current_x, float current_y, float current_
     if (error > 180.0f)  error -= 360.0f;
     if (error < -180.0f) error += 360.0f;
 
-    uint32_t now = HAL_GetTick();
-    float dt = (now - m->last_time_ms) / 1000.0f; 
-    if (dt <= 0.0f) dt = 0.001f; 
+    // --- REMOVED HAL_GetTick Jitter Logic ---
+    // In FreeRTOS, we trust the scheduler to run this task 
+    // at a specific frequency (e.g. 50Hz = 0.02s) provided by the caller.
+    if (dt <= 0.0001f) dt = 0.02f; // Safety clamp
 
     float P = m->Kp * error;
 
@@ -85,7 +88,7 @@ void Motion_Update(Motion_t *m, float current_x, float current_y, float current_
     float pid_output = P + I + D;
 
     m->prev_error = error;
-    m->last_time_ms = now;
+    // m->last_time_ms = now; // REMOVED
 
     float final_servo_angle = m->servo_center_deg + pid_output;
 

@@ -2,28 +2,19 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2022 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
+  * @brief          : Main program body (FreeRTOS + CAN Ticks/Yaw)
   ******************************************************************************
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "cmsis_os.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "myprintf.h"
+#include "myprintf.h" 
 #include "servo.h"
-#include "motion.h"
+#include "motion.h"   
 #include <string.h>
 #include <math.h>
 
@@ -34,48 +25,92 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+// UPDATED: Struct matches CAN payload (Float Yaw + Int32 Ticks)
+typedef struct {
+    float yaw;
+    int32_t ticks;
+} SensorData_t;
 
+typedef struct {
+    float x;
+    float y;
+} Waypoint_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
 #ifndef HSEM_ID_0
-#define HSEM_ID_0 (0U) /* HW semaphore 0*/
+#define HSEM_ID_0 (0U)
 #endif
+
+#define TICKS_PER_CM     4.58f
+#define DEG_TO_RAD       0.01745329f
+#define TARGET_THRESHOLD 4.0f
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-
 FDCAN_HandleTypeDef hfdcan1;
-
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim13;
-
 UART_HandleTypeDef huart3;
+
+/* Definitions for defaultTask */
+osThreadId_t defaultTaskHandle;
+const osThreadAttr_t defaultTask_attributes = {
+  .name = "defaultTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
 
 /* USER CODE BEGIN PV */
 FDCAN_FilterTypeDef sFilterConfig;
 FDCAN_TxHeaderTypeDef TxHeader;
-FDCAN_RxHeaderTypeDef RxHeader;
-uint8_t TxData[8] = {0x10, 0x34, 0x54, 0x76, 0x98, 0x00, 0x11, 0x22};
-uint8_t RxData[8];
 
+// --- FreeRTOS Handles ---
+osMutexId_t printfMutexHandle;
+const osMutexAttr_t printfMutex_attributes = {
+  .name = "PrintfMutex"
+};
+
+osMessageQueueId_t sensorQueueHandle;
+const osMessageQueueAttr_t sensorQueue_attributes = {
+  .name = "SensorQueue"
+};
+
+osThreadId_t motionTaskHandle;
+const osThreadAttr_t motionTask_attributes = {
+  .name = "MotionTask",
+  .stack_size = 512 * 4, 
+  .priority = (osPriority_t) osPriorityAboveNormal,
+};
+
+osThreadId_t telemetryTaskHandle;
+const osThreadAttr_t telemetryTask_attributes = {
+  .name = "TelemetryTask",
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+
+// --- Robot State ---
 Motion_t robotMotion;
 float Global_Robot_X = 0.0f;
 float Global_Robot_Y = 0.0f;
-float Global_Robot_Yaw = 0.0f;
+volatile float Global_Robot_Yaw = 0.0f;   
+volatile int32_t Global_Robot_Ticks = 0;  
 
-// Variables from the ESP32s
-float currentYaw = 0.0f;
-// Ticks received via CAN
-volatile int32_t currentTicks = 0;
-
+// --- Navigation Path ---
+Waypoint_t path[] = {
+    {50.0f, 0.0f},
+    {100.0f, 0.0f},
+    {200.0f, 0.0f}
+};
+int total_waypoints = sizeof(path) / sizeof(path[0]);
+int current_wp_idx = 0;
+uint8_t finished_path = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -85,14 +120,15 @@ static void MX_USART3_UART_Init(void);
 static void MX_FDCAN1_Init(void);
 static void MX_TIM13_Init(void);
 static void MX_TIM2_Init(void);
-/* USER CODE BEGIN PFP */
-void CAN_Process_Messages(void);
-float getYaw(void);
-int32_t getTicks(void);
+void StartDefaultTask(void *argument);
 
-// ESC control functions
+/* USER CODE BEGIN PFP */
+// ** CRITICAL: Prototypes added here to fix compiler errors **
+void StartMotionTask(void *argument);
+void StartTelemetryTask(void *argument);
+
+int32_t getTicks(void);
 void setEscSpeed_us(uint16_t pulse_us);
-void stopCarEsc(void);                 
 static uint8_t esc_invert = 1;
 
 static inline uint16_t esc_apply_dir(uint16_t us)
@@ -101,58 +137,51 @@ static inline uint16_t esc_apply_dir(uint16_t us)
     if (us > 2000) us = 2000;
     return esc_invert ? (uint16_t)(3000 - us) : us;
 }
-
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-// --- 1. The Processing Engine ---
-// Call this as often as possible to keep data fresh
-void CAN_Process_Messages(void)
+// --- CAN RX Callback ---
+// Expects 8 bytes: [Byte 0-3: float Yaw] [Byte 4-7: int32 Ticks]
+void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 {
-	FDCAN_RxHeaderTypeDef localHeader;
-  int ret;
-  ret = HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &localHeader, RxData);
+    if((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) != RESET)
+    {
+        FDCAN_RxHeaderTypeDef localHeader;
+        uint8_t localRxData[8];
 
-	/* Process all available messages */
-  while (ret == HAL_OK) {
-      uint8_t dlc_bytes;
-      if (localHeader.DataLength > 0x0F) {
-          dlc_bytes = (localHeader.DataLength >> 16) & 0x0F;
-      } else {
-          dlc_bytes = (uint8_t)localHeader.DataLength;
-      }
+        if (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &localHeader, localRxData) == HAL_OK)
+        {
+            if (localHeader.DataLength == FDCAN_DLC_BYTES_8)
+            {
+                float tempYaw;
+                int32_t tempTicks;
+                
+                // Safe memcpy
+                memcpy(&tempYaw, &localRxData[0], sizeof(float));
+                memcpy(&tempTicks, &localRxData[4], sizeof(int32_t));
 
-      //printf("RECV: ID=0x%lX | DLC=%u", localHeader.Identifier, dlc_bytes);
+                // Validity Check: Only check floats for NaN. Integer ticks are always valid.
+                if (!isnan(tempYaw) && !isinf(tempYaw))
+                {
+                    SensorData_t data;
+                    data.yaw = tempYaw;
+                    data.ticks = tempTicks;
 
-      if (dlc_bytes >= 4) {
-        union { float f; uint8_t b[4]; } conv;
-        conv.b[0] = RxData[0];
-        conv.b[1] = RxData[1];
-        conv.b[2] = RxData[2];
-        conv.b[3] = RxData[3];
-        currentYaw = conv.f;
-
-        // --- Extract Encoder ticks ---
-        /* Encoder ticks in CAN message are ignored now -  local TIM4 encoder instead */
-        memcpy(&currentTicks, &RxData[4], sizeof(int32_t));
+                    // Send to Queue
+                    osMessageQueuePut(sensorQueueHandle, &data, 0, 0);
+                }
+            }
+        }
     }
-
-    // Get next message if available
-    ret = HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &localHeader, RxData);
-  }
 }
 
-// --- Getter Functions ---
-float getYaw(void) {
-    return currentYaw;
+// UPDATED: Return the global variable updated by CAN/MotionTask
+int32_t getTicks(void)
+{
+    return Global_Robot_Ticks; 
 }
-
-int32_t getTicks(void) {
-  return currentTicks;
-}
-
 
 /* USER CODE END 0 */
 
@@ -162,55 +191,31 @@ int32_t getTicks(void) {
   */
 int main(void)
 {
-
   /* USER CODE BEGIN 1 */
-
   /* USER CODE END 1 */
-	/* USER CODE BEGIN Boot_Mode_Sequence_0 */
-	  int32_t timeout;
-	/* USER CODE END Boot_Mode_Sequence_0 */
+  
+  /* USER CODE BEGIN Boot_Mode_Sequence_0 */
+  int32_t timeout;
+  /* USER CODE END Boot_Mode_Sequence_0 */
 
-/* USER CODE BEGIN Boot_Mode_Sequence_1 */
-  /* Wait until CPU2 boots and enters in stop mode or timeout*/
+  /* USER CODE BEGIN Boot_Mode_Sequence_1 */
   timeout = 0xFFFF;
   while((__HAL_RCC_GET_FLAG(RCC_FLAG_D2CKRDY) != RESET) && (timeout-- > 0));
-  if ( timeout < 0 )
-  {
-  Error_Handler();
-  }
-/* USER CODE END Boot_Mode_Sequence_1 */
+  if ( timeout < 0 ) { Error_Handler(); }
+  /* USER CODE END Boot_Mode_Sequence_1 */
+
   /* MCU Configuration--------------------------------------------------------*/
-
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
-
-  /* USER CODE BEGIN Init */
-
-  /* USER CODE END Init */
-
-  /* Configure the system clock */
   SystemClock_Config();
-/* USER CODE BEGIN Boot_Mode_Sequence_2 */
-  /* When system initialization is finished, Cortex-M7 will release Cortex-M4 by means of
-  HSEM notification */
-  /*HW semaphore Clock enable*/
+
+  /* USER CODE BEGIN Boot_Mode_Sequence_2 */
   __HAL_RCC_HSEM_CLK_ENABLE();
-  /*Take HSEM */
   HAL_HSEM_FastTake(HSEM_ID_0);
-  /*Release HSEM in order to notify the CPU2(CM4)*/
   HAL_HSEM_Release(HSEM_ID_0,0);
-  /* wait until CPU2 wakes up from stop mode */
   timeout = 0xFFFF;
   while((__HAL_RCC_GET_FLAG(RCC_FLAG_D2CKRDY) == RESET) && (timeout-- > 0));
-  if ( timeout < 0 )
-  {
-  Error_Handler();
-  }
-/* USER CODE END Boot_Mode_Sequence_2 */
-
-  /* USER CODE BEGIN SysInit */
-
-  /* USER CODE END SysInit */
+  if ( timeout < 0 ) { Error_Handler(); }
+  /* USER CODE END Boot_Mode_Sequence_2 */
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
@@ -218,106 +223,170 @@ int main(void)
   MX_FDCAN1_Init();
   MX_TIM13_Init();
   MX_TIM2_Init();
+
   /* USER CODE BEGIN 2 */
   HAL_TIM_PWM_Start(&htim13, TIM_CHANNEL_1); // Servo
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);  // ESC
 
-  setEscSpeed_us(1500); // Neutral signal
-  HAL_Delay(1000);
-
-  #define TICKS_PER_CM    4.58f
-  #define DEG_TO_RAD      0.01745329f
-  #define TARGET_THRESHOLD 4.0f
-
   Motion_Init(&robotMotion);
-
-  int32_t last_ticks = getTicks();
-  int32_t current_ticks = 0;
-
-  typedef struct {
-    float x;
-    float y;
-  } Waypoint_t;
-
-  Waypoint_t path[] = {
-      {50.0f, 0.0f},
-      {100.0f, 0.0f},
-      {200.0f, 0.0f}
-  };
-
-  int total_waypoints = sizeof(path) / sizeof(path[0]);
-  int current_wp_idx = 0;
-  uint8_t finished_path = 0;
-
-  Motion_AcceptCoords(&robotMotion, path[current_wp_idx].x, path[current_wp_idx].y);
+  Motion_AcceptCoords(&robotMotion, path[0].x, path[0].y);
   /* USER CODE END 2 */
 
-  /* USER CODE BEGIN WHILE */
-  while (1)
+  /* Init scheduler */
+  osKernelInitialize();
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  printfMutexHandle = osMutexNew(&printfMutex_attributes);
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  sensorQueueHandle = osMessageQueueNew(1, sizeof(SensorData_t), &sensorQueue_attributes);
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  motionTaskHandle = osThreadNew(StartMotionTask, NULL, &motionTask_attributes);
+  telemetryTaskHandle = osThreadNew(StartTelemetryTask, NULL, &telemetryTask_attributes);
+  /* USER CODE END RTOS_THREADS */
+
+  /* Start scheduler */
+  osKernelStart();
+
+  while (1) {}
+}
+
+/* USER CODE BEGIN 4 */
+
+/**
+  * @brief  Motion Task: Handles Physics, PID, and ESC/Servo
+  */
+void StartMotionTask(void *argument)
+{
+  SensorData_t sensorData;
+  int32_t last_ticks = 0; 
+  int32_t current_ticks = 0;
+  
+  // Wait initially to receive at least one CAN message to populate globals
+  osDelay(100);
+  last_ticks = getTicks();
+
+  const uint32_t TASK_PERIOD_MS = 20;
+  const float DT_SECONDS = 0.02f; 
+
+  for(;;)
   {
-      CAN_Process_Messages();
+    // 1. Get latest sensor data from ISR
+    if (osMessageQueueGet(sensorQueueHandle, &sensorData, NULL, 0) == osOK)
+    {
+        Global_Robot_Yaw = sensorData.yaw;
+        Global_Robot_Ticks = sensorData.ticks; // Update global ticks from CAN
+    }
 
-      current_ticks = getTicks();
-      int32_t delta = current_ticks - last_ticks;
-      last_ticks = current_ticks;
+    // 2. Odometry
+    current_ticks = getTicks(); // Returns Global_Robot_Ticks
+    int32_t delta = current_ticks - last_ticks;
+    last_ticks = current_ticks;
 
-      if (delta != 0) {
-          float dist_cm = (float)delta / TICKS_PER_CM;
+    // Calculate Position Update
+    if (delta != 0) {
+        float dist_cm = (float)delta / TICKS_PER_CM;
+        Global_Robot_X += dist_cm * cosf(Global_Robot_Yaw * DEG_TO_RAD);
+        Global_Robot_Y += dist_cm * sinf(Global_Robot_Yaw * DEG_TO_RAD);
+    }
 
-          Global_Robot_X += dist_cm * cosf(Global_Robot_Yaw * DEG_TO_RAD);
-          Global_Robot_Y += dist_cm * sinf(Global_Robot_Yaw * DEG_TO_RAD);
-      }
+    // 3. Motion Update
+    Motion_Update(&robotMotion, Global_Robot_X, Global_Robot_Y, Global_Robot_Yaw, DT_SECONDS);
 
-      Motion_Update(&robotMotion, Global_Robot_X, Global_Robot_Y, Global_Robot_Yaw);
+    // 4. Waypoint Logic
+    if (!finished_path)
+    {
+        float dist_to_target = path[current_wp_idx].x - Global_Robot_X; // Simplified X-axis logic
+        
+        if (fabsf(dist_to_target) < TARGET_THRESHOLD)
+        {
+            // Reached Waypoint
+            setEscSpeed_us(1500); 
+            HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_SET);
 
-      if (!finished_path)
-      {
-    	  float dist_to_target = path[current_wp_idx].x - Global_Robot_X;
-    	  printf("DISTANCIA:%f\r\n ", dist_to_target);
-          /*float dx = path[current_wp_idx].x - Global_Robot_X;
-          float dy = path[current_wp_idx].y - Global_Robot_Y;
-          float dist_sq = (dx * dx) + (dy * dy);
-          float threshold_sq = TARGET_THRESHOLD * TARGET_THRESHOLD;*/
+            osDelay(3000); // RTOS Delay (allows other tasks to run)
 
-          if (dist_to_target < 4.0f)
-          {
-        	  setEscSpeed_us(1500);
-              HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_SET);
+            HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_RESET);
+            
+            current_wp_idx++;
+            if (current_wp_idx < total_waypoints)
+            {
+                Motion_AcceptCoords(&robotMotion, path[current_wp_idx].x, path[current_wp_idx].y);
+            }
+            else
+            {
+                finished_path = 1;
+                Motion_Stop(&robotMotion);
+            }
+        }
+    }
 
-              HAL_Delay(3000);
-
-              HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_RESET);
-              printf("DISTANCIA antes del erase: %f\r\n", dist_to_target);
-              CAN_Process_Messages(); // Clear buffer
-              last_ticks = getTicks();
-              printf("DISTANCIA DESPUES del erase: %f\r\n", dist_to_target);
-
-              current_wp_idx++;
-
-              if (current_wp_idx < total_waypoints)
-              {
-                  Motion_AcceptCoords(&robotMotion, path[current_wp_idx].x, path[current_wp_idx].y);
-              }
-              else
-              {
-                  finished_path = 1;
-                  /*setEscSpeed_us(1500);*/
-                  Motion_Stop(&robotMotion);
-                  //HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_RESET);
-              }
-          }
-      }
-      HAL_Delay(20);
+    osDelay(TASK_PERIOD_MS); 
   }
-  /* USER CODE END WHILE */
-  /* USER CODE BEGIN 3 */
-  /* USER CODE END 3 */
 }
 
 /**
-  * @brief System Clock Configuration
+  * @brief  Telemetry Task
+  */
+void StartTelemetryTask(void *argument)
+{
+  for(;;)
+  {
+    // Updated to print Ticks instead of Distance
+    printf("Yaw: %.2f, Ticks: %ld, X: %.2f, Y: %.2f\r\n", 
+           Global_Robot_Yaw, Global_Robot_Ticks, Global_Robot_X, Global_Robot_Y);
+    
+    osDelay(200);
+  }
+}
+/* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  */
+/* USER CODE END Header_StartDefaultTask */
+void StartDefaultTask(void *argument)
+{
+  /* USER CODE BEGIN 5 */
+  for(;;)
+  {
+    HAL_GPIO_TogglePin(GPIOB, LD1_Pin);
+    osDelay(500);
+  }
+  /* USER CODE END 5 */
+}
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM6 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
   * @retval None
   */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM6)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
+}
+
+// ... [Keep MX_..._Init functions exactly as CubeMX generated them] ...
+
 void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
@@ -373,11 +442,8 @@ void SystemClock_Config(void)
   }
 }
 
-/**
-  * @brief FDCAN1 Initialization Function
-  * @param None
-  * @retval None
-  */
+// ... [Keep MX_GPIO_Init, MX_USART3_UART_Init, MX_FDCAN1_Init, MX_TIM13_Init, MX_TIM2_Init] ...
+
 static void MX_FDCAN1_Init(void)
 {
 
@@ -428,43 +494,30 @@ static void MX_FDCAN1_Init(void)
   sFilterConfig.FilterID1 = 0x000;
   sFilterConfig.FilterID2 = 0x000;
 
-  /* Configure global filter to reject all non-matching frames */
   HAL_FDCAN_ConfigGlobalFilter(&hfdcan1, FDCAN_REJECT, FDCAN_REJECT, FDCAN_REJECT_REMOTE, FDCAN_REJECT_REMOTE);
 
   if (HAL_FDCAN_ConfigFilter(&hfdcan1, &sFilterConfig) != HAL_OK)
     {
-       /* Filter configuration Error */
        Error_Handler();
     }
-   /* Start the FDCAN module */
   if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK) {
     }
-       /* Start Error */
   if (HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0) != HAL_OK) {
     }
-       /* Notification Error */
 
-   /* Configure Tx buffer message */
-  TxHeader.Identifier = 0x111;
-  TxHeader.IdType = FDCAN_STANDARD_ID;
-  TxHeader.TxFrameType = FDCAN_DATA_FRAME;
-  TxHeader.DataLength = FDCAN_DLC_BYTES_8 ;
-  TxHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
-  TxHeader.BitRateSwitch = FDCAN_BRS_ON;
-  TxHeader.FDFormat = FDCAN_FD_CAN;
-  TxHeader.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
-  TxHeader.MessageMarker = 0x00;
-
-
+   TxHeader.Identifier = 0x111;
+   TxHeader.IdType = FDCAN_STANDARD_ID;
+   TxHeader.TxFrameType = FDCAN_DATA_FRAME;
+   TxHeader.DataLength = FDCAN_DLC_BYTES_8 ;
+   TxHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+   TxHeader.BitRateSwitch = FDCAN_BRS_ON;
+   TxHeader.FDFormat = FDCAN_FD_CAN;
+   TxHeader.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
+   TxHeader.MessageMarker = 0x00;
   /* USER CODE END FDCAN1_Init 2 */
 
 }
 
-/**
-  * @brief TIM2 Initialization Function
-  * @param None
-  * @retval None
-  */
 static void MX_TIM2_Init(void)
 {
 
@@ -509,11 +562,6 @@ static void MX_TIM2_Init(void)
 
 }
 
-/**
-  * @brief TIM13 Initialization Function
-  * @param None
-  * @retval None
-  */
 static void MX_TIM13_Init(void)
 {
 
@@ -555,11 +603,6 @@ static void MX_TIM13_Init(void)
 
 }
 
-/**
-  * @brief USART3 Initialization Function
-  * @param None
-  * @retval None
-  */
 static void MX_USART3_UART_Init(void)
 {
 
@@ -603,11 +646,6 @@ static void MX_USART3_UART_Init(void)
 
 }
 
-/**
-  * @brief GPIO Initialization Function
-  * @param None
-  * @retval None
-  */
 static void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
@@ -653,37 +691,12 @@ static void MX_GPIO_Init(void)
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
-/* USER CODE BEGIN 4 */
-
-/* USER CODE END 4 */
-
-/**
-  * @brief  This function is executed in case of error occurrence.
-  * @retval None
-  */
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
   }
   /* USER CODE END Error_Handler_Debug */
 }
-#ifdef USE_FULL_ASSERT
-/**
-  * @brief  Reports the name of the source file and the source line number
-  *         where the assert_param error has occurred.
-  * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
-  * @retval None
-  */
-void assert_failed(uint8_t *file, uint32_t line)
-{
-  /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
-  /* USER CODE END 6 */
-}
-#endif /* USE_FULL_ASSERT */
