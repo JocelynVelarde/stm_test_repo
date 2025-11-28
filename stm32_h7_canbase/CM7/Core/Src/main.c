@@ -45,7 +45,7 @@ typedef struct {
 
 #define TICKS_PER_CM     4.58f
 #define DEG_TO_RAD       0.01745329f
-#define TARGET_THRESHOLD 4.0f
+#define TARGET_THRESHOLD 25.0f
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -103,11 +103,19 @@ volatile float Global_Robot_Yaw = 0.0f;
 volatile int32_t Global_Robot_Ticks = 0;  
 
 // --- Navigation Path ---
+// Waypoint_t path[] = {
+//     {50.0f, 0.0f},
+//     {200.0f, 0.0f},
+//     {350.0f, 0.0f}
+// };
+
 Waypoint_t path[] = {
-    {50.0f, 0.0f},
-    {100.0f, 0.0f},
-    {200.0f, 0.0f}
+    {100.0f, 30.0f},
+    {250.0f, -30.0f},
+    {400.0f, 0.0f},
+	{425.0f, -250.0}
 };
+
 int total_waypoints = sizeof(path) / sizeof(path[0]);
 int current_wp_idx = 0;
 uint8_t finished_path = 0;
@@ -123,7 +131,6 @@ static void MX_TIM2_Init(void);
 void StartDefaultTask(void *argument);
 
 /* USER CODE BEGIN PFP */
-// ** CRITICAL: Prototypes added here to fix compiler errors **
 void StartMotionTask(void *argument);
 void StartTelemetryTask(void *argument);
 
@@ -275,12 +282,19 @@ void StartMotionTask(void *argument)
   const uint32_t TASK_PERIOD_MS = 20;
   const float DT_SECONDS = 0.02f; 
 
+  float filtered_yaw = 0.0f;
+  const float ALPHA_FILTER = 0.2f;
+
   for(;;)
   {
     // 1. Get latest sensor data from ISR
     if (osMessageQueueGet(sensorQueueHandle, &sensorData, NULL, 0) == osOK)
     {
-        Global_Robot_Yaw = sensorData.yaw;
+        // Global_Robot_Yaw = sensorData.yaw;
+        float raw_yaw = sensorData.yaw;
+        filtered_yaw = ALPHA_FILTER * raw_yaw + (1.0f - ALPHA_FILTER) * filtered_yaw;
+        Global_Robot_Yaw = filtered_yaw;
+
         Global_Robot_Ticks = sensorData.ticks; // Update global ticks from CAN
     }
 
@@ -297,7 +311,7 @@ void StartMotionTask(void *argument)
     }
 
     // 3. Motion Update
-    Motion_Update(&robotMotion, Global_Robot_X, Global_Robot_Y, Global_Robot_Yaw, DT_SECONDS);
+    Motion_Update(&robotMotion, Global_Robot_X, Global_Robot_Y, 0.0f, DT_SECONDS);
 
     // 4. Waypoint Logic
     if (!finished_path)
@@ -307,10 +321,10 @@ void StartMotionTask(void *argument)
         if (fabsf(dist_to_target) < TARGET_THRESHOLD)
         {
             // Reached Waypoint
-            setEscSpeed_us(1500); 
+            // setEscSpeed_us(1500); 
             HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_SET);
 
-            osDelay(3000); // RTOS Delay (allows other tasks to run)
+            osDelay(500); // RTOS Delay (allows other tasks to run)
 
             HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_RESET);
             
