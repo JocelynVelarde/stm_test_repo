@@ -32,6 +32,12 @@ typedef struct {
 } SensorData_t;
 
 typedef struct {
+    int16_t x;
+    int16_t y;
+    int16_t angle;
+} CameraData_t;
+
+typedef struct {
     float x;
     float y;
 } Waypoint_t;
@@ -45,7 +51,10 @@ typedef struct {
 
 #define TICKS_PER_CM     4.58f
 #define DEG_TO_RAD       0.01745329f
+#define CAM_THRESHOLD    20.0f
 #define TARGET_THRESHOLD 25.0f
+#define CAN_ID_SENSOR    0x30
+#define CAN_ID_CAMERA    0x35
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -59,6 +68,7 @@ TIM_HandleTypeDef htim13;
 UART_HandleTypeDef huart3;
 
 /* Definitions for defaultTask */
+// For turning LED
 osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
   .name = "defaultTask",
@@ -71,16 +81,24 @@ FDCAN_FilterTypeDef sFilterConfig;
 FDCAN_TxHeaderTypeDef TxHeader;
 
 // --- FreeRTOS Handles ---
+// For printing on UART
 osMutexId_t printfMutexHandle;
 const osMutexAttr_t printfMutex_attributes = {
   .name = "PrintfMutex"
 };
 
+// For CAN Messages
 osMessageQueueId_t sensorQueueHandle;
 const osMessageQueueAttr_t sensorQueue_attributes = {
   .name = "SensorQueue"
 };
 
+osMessageQueueId_t cameraQueueHandle;
+const osMessageQueueAttr_t cameraQueue_attributes = {
+  .name = "CameraQueue"
+};
+
+// For movement and yaw
 osThreadId_t motionTaskHandle;
 const osThreadAttr_t motionTask_attributes = {
   .name = "MotionTask",
@@ -88,6 +106,7 @@ const osThreadAttr_t motionTask_attributes = {
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
 
+// for printing stats messages
 osThreadId_t telemetryTaskHandle;
 const osThreadAttr_t telemetryTask_attributes = {
   .name = "TelemetryTask",
@@ -102,6 +121,11 @@ float Global_Robot_Y = 0.0f;
 volatile float Global_Robot_Yaw = 0.0f;   
 volatile int32_t Global_Robot_Ticks = 0;  
 
+// Camera State
+volatile float Global_Cam_X = 0.0f;
+volatile float Global_Cam_Y = 0.0f;
+volatile uint8_t Camera_Seen_Target = 0;
+
 // --- Navigation Path ---
 // Waypoint_t path[] = {
 //     {50.0f, 0.0f},
@@ -109,11 +133,13 @@ volatile int32_t Global_Robot_Ticks = 0;
 //     {350.0f, 0.0f}
 // };
 
+// tener nuestros waypoints aqui y ocupamos leer los datos de la camara
+//  qel LED cuando ya estemos ahi con la camara
 Waypoint_t path[] = {
+    {50.0f, 0.0f},
     {100.0f, 30.0f},
-    {250.0f, -30.0f},
-    {400.0f, 0.0f},
-	{425.0f, -250.0}
+    {150.0f, 0.0f},
+	{250.0f, -30.0}
 };
 
 int total_waypoints = sizeof(path) / sizeof(path[0]);
@@ -160,6 +186,8 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 
         if (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &localHeader, localRxData) == HAL_OK)
         {
+        	if (localHeader.Identifier == CAN_ID_SENSOR || localHeader.Identifier == 0x00)
+        	            {
             if (localHeader.DataLength == FDCAN_DLC_BYTES_8)
             {
                 float tempYaw;
@@ -180,6 +208,20 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
                     osMessageQueuePut(sensorQueueHandle, &data, 0, 0);
                 }
             }
+        	            }
+        	else if (localHeader.Identifier == CAN_ID_CAMERA)
+        	            {
+        	                // ESP32 sends: [X_High, X_Low, Y_High, Y_Low, Ang_High, Ang_Low]
+        	                CameraData_t camData;
+
+        	                // Decode Big Endian from CAN Frame
+        	                camData.x     = (int16_t)((localRxData[0] << 8) | localRxData[1]);
+        	                camData.y     = (int16_t)((localRxData[2] << 8) | localRxData[3]);
+        	                camData.angle = (int16_t)((localRxData[4] << 8) | localRxData[5]);
+
+        	                // Send to Camera Queue
+        	                osMessageQueuePut(cameraQueueHandle, &camData, 0, 0);
+        	            }
         }
     }
 }
@@ -248,6 +290,7 @@ int main(void)
 
   /* USER CODE BEGIN RTOS_QUEUES */
   sensorQueueHandle = osMessageQueueNew(1, sizeof(SensorData_t), &sensorQueue_attributes);
+  cameraQueueHandle = osMessageQueueNew(1, sizeof(CameraData_t), &cameraQueue_attributes);
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -272,62 +315,76 @@ int main(void)
 void StartMotionTask(void *argument)
 {
   SensorData_t sensorData;
+  CameraData_t cameraData;
+
   int32_t last_ticks = 0; 
   int32_t current_ticks = 0;
   
-  // Wait initially to receive at least one CAN message to populate globals
   osDelay(100);
   last_ticks = getTicks();
 
   const uint32_t TASK_PERIOD_MS = 20;
   const float DT_SECONDS = 0.02f; 
-
   float filtered_yaw = 0.0f;
   const float ALPHA_FILTER = 0.2f;
 
   for(;;)
   {
-    // 1. Get latest sensor data from ISR
+    // --- 1. SENSOR UPDATE (Odometry) ---
     if (osMessageQueueGet(sensorQueueHandle, &sensorData, NULL, 0) == osOK)
     {
-        // Global_Robot_Yaw = sensorData.yaw;
         float raw_yaw = sensorData.yaw;
         filtered_yaw = ALPHA_FILTER * raw_yaw + (1.0f - ALPHA_FILTER) * filtered_yaw;
         Global_Robot_Yaw = filtered_yaw;
-
-        Global_Robot_Ticks = sensorData.ticks; // Update global ticks from CAN
+        Global_Robot_Ticks = sensorData.ticks;
     }
 
-    // 2. Odometry
-    current_ticks = getTicks(); // Returns Global_Robot_Ticks
+    // --- 2. CAMERA UPDATE (Background Monitor) ---
+    // We only read this to update Global_Cam variables
+    if (osMessageQueueGet(cameraQueueHandle, &cameraData, NULL, 0) == osOK)
+    {
+        Global_Cam_X = (float)cameraData.x;
+        Global_Cam_Y = (float)cameraData.y;
+    }
+
+    // --- 3. PHYSICS & ODOMETRY ---
+    current_ticks = getTicks();
     int32_t delta = current_ticks - last_ticks;
     last_ticks = current_ticks;
 
-    // Calculate Position Update
     if (delta != 0) {
         float dist_cm = (float)delta / TICKS_PER_CM;
         Global_Robot_X += dist_cm * cosf(Global_Robot_Yaw * DEG_TO_RAD);
         Global_Robot_Y += dist_cm * sinf(Global_Robot_Yaw * DEG_TO_RAD);
     }
 
-    // 3. Motion Update
+    // --- 4. CONTROL LOOP (Using INTERNAL coords) ---
+    // The robot drives blindly based on Odometry (Global_Robot_X/Y)
     Motion_Update(&robotMotion, Global_Robot_X, Global_Robot_Y, 0.0f, DT_SECONDS);
 
-    // 4. Waypoint Logic
+    // --- 5. LOGIC CHECK ---
     if (!finished_path)
     {
-        float dist_to_target = path[current_wp_idx].x - Global_Robot_X; // Simplified X-axis logic
-        
-        if (fabsf(dist_to_target) < TARGET_THRESHOLD)
-        {
-            // Reached Waypoint
-            // setEscSpeed_us(1500); 
+        // A. MOVEMENT LOGIC (Am I close based on Odometry?)
+        float dx_odo = path[current_wp_idx].x - Global_Robot_X;
+        float dy_odo = path[current_wp_idx].y - Global_Robot_Y;
+        float dist_odo = sqrtf(dx_odo*dx_odo + dy_odo*dy_odo);
+
+        // B. CAMERA LOGIC (Do I see the target?)
+        float dx_cam = path[current_wp_idx].x - Global_Cam_X;
+        float dy_cam = path[current_wp_idx].y - Global_Cam_Y;
+        float dist_cam = sqrtf(dx_cam*dx_cam + dy_cam*dy_cam);
+
+        // C. LED CONTROL (Based on CAMERA)
+        if (dist_cam < CAM_THRESHOLD) {
             HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_SET);
-
-            osDelay(500); // RTOS Delay (allows other tasks to run)
-
+        } else {
             HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_RESET);
-            
+        }
+
+        // D. SWITCH WAYPOINT (Based on ODOMETRY)
+        if (dist_odo < TARGET_THRESHOLD)
+        {
             current_wp_idx++;
             if (current_wp_idx < total_waypoints)
             {
@@ -353,8 +410,10 @@ void StartTelemetryTask(void *argument)
   for(;;)
   {
     // Updated to print Ticks instead of Distance
-    printf("Yaw: %.2f, Ticks: %ld, X: %.2f, Y: %.2f\r\n", 
-           Global_Robot_Yaw, Global_Robot_Ticks, Global_Robot_X, Global_Robot_Y);
+	  printf("Odo: (%.0f, %.0f) | Cam: (%.0f, %.0f) | LED: %d\r\n",
+	             Global_Robot_X, Global_Robot_Y,
+	             Global_Cam_X, Global_Cam_Y,
+	             HAL_GPIO_ReadPin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin));
     
     osDelay(200);
   }
