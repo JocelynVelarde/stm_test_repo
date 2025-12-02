@@ -1,6 +1,6 @@
 #include "esc.h"
-#include <stdio.h>     // snprintf
-#include <string.h>    // strlen
+#include <stdio.h>
+#include <string.h>
 
 extern TIM_HandleTypeDef htim2;
 
@@ -29,5 +29,5 @@ void setEscSpeed_us(uint16_t pulse_us)
 void stopCarEsc(void)
 {
     setEscSpeed_us(1500);
-    HAL_Delay(500);
+    HAL_Delay(1000);
 }

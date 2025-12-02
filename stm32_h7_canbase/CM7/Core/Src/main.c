@@ -18,10 +18,6 @@
 #include "constants.h"
 #include <string.h>
 #include <math.h>
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -40,9 +36,10 @@
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
 /* USER CODE END PM */
-
 /* Private variables ---------------------------------------------------------*/
 FDCAN_HandleTypeDef hfdcan1;
+FDCAN_FilterTypeDef sFilterConfig;
+FDCAN_TxHeaderTypeDef TxHeader;
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim13;
 UART_HandleTypeDef huart3;
@@ -56,17 +53,12 @@ const osThreadAttr_t defaultTask_attributes = {
 };
 
 /* USER CODE BEGIN PV */
-FDCAN_FilterTypeDef sFilterConfig;
-FDCAN_TxHeaderTypeDef TxHeader;
-
 // --- FreeRTOS Handles ---
-// For printing on UART
 osMutexId_t printfMutexHandle;
 const osMutexAttr_t printfMutex_attributes = {
   .name = "PrintfMutex"
 };
 
-// For CAN Messages
 osMessageQueueId_t sensorQueueHandle;
 const osMessageQueueAttr_t sensorQueue_attributes = {
   .name = "SensorQueue"
@@ -77,7 +69,6 @@ const osMessageQueueAttr_t cameraQueue_attributes = {
   .name = "CameraQueue"
 };
 
-// For movement and yaw
 osThreadId_t motionTaskHandle;
 const osThreadAttr_t motionTask_attributes = {
   .name = "MotionTask",
@@ -85,7 +76,6 @@ const osThreadAttr_t motionTask_attributes = {
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
 
-// for printing stats messages
 osThreadId_t telemetryTaskHandle;
 const osThreadAttr_t telemetryTask_attributes = {
   .name = "TelemetryTask",
@@ -93,26 +83,34 @@ const osThreadAttr_t telemetryTask_attributes = {
   .priority = (osPriority_t) osPriorityLow,
 };
 
-// --- Robot State ---
-Motion_t robotMotion;
-float Global_Robot_X = 0.0f;
-float Global_Robot_Y = 0.0f;
-volatile float Global_Robot_Yaw = 0.0f;   
-volatile int32_t Global_Robot_Ticks = 0;  
-
 // Camera State
 volatile float Global_Cam_X = 0.0f;
 volatile float Global_Cam_Y = 0.0f;
 volatile uint8_t Camera_Seen_Target = 0;
+
+// Control and Odometry
+typedef enum {
+    STATE_RUNNING,
+    STATE_WAITING
+} RobotState_t;
+
+Motion_t robotMotion;
+RobotState_t motionState = STATE_RUNNING;
+float Global_Robot_X = 0.0f;
+float Global_Robot_Y = 0.0f;
+volatile float Global_Robot_Yaw = 0.0f;   
+volatile int32_t Global_Robot_Ticks = 0;  
+uint32_t waitStartTime = 0;
+volatile ControlCmd_t g_ctrl = {0.0f, 0.0f};
+volatile OdomMeasurement_t gOdom = {0.0f};
 
 // --- Navigation Path ---
 Waypoint_t path[] = {
     {30.0f, 0.0f},
     {80.0f, 0.0f},
     {120.0f, 0.0f},
-	  {180.0f, 90.0f}
+	  {180.0f, 80.0f}
 };
-
 int total_waypoints = sizeof(path) / sizeof(path[0]);
 int current_wp_idx = 0;
 uint8_t finished_path = 0;
@@ -130,66 +128,52 @@ void StartDefaultTask(void *argument);
 /* USER CODE BEGIN PFP */
 void StartMotionTask(void *argument);
 void StartTelemetryTask(void *argument);
-
-int32_t getTicks(void);
+void StartActuatorTask(void *argument);
 void setEscSpeed_us(uint16_t pulse_us);
-static uint8_t esc_invert = 1;
-
-static inline uint16_t esc_apply_dir(uint16_t us)
-{
-    if (us < 1000) us = 1000;
-    if (us > 2000) us = 2000;
-    return esc_invert ? (uint16_t)(3000 - us) : us;
-}
+int32_t getTicks(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
-// --- CAN RX Callback ---
 void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 {
     if((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) != RESET)
     {
-        FDCAN_RxHeaderTypeDef localHeader;
-        uint8_t localRxData[8];
-
-        if (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &localHeader, localRxData) == HAL_OK)
+      FDCAN_RxHeaderTypeDef localHeader;
+      uint8_t localRxData[8];
+      if (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &localHeader, localRxData) == HAL_OK)
+      {
+        if (localHeader.Identifier == CAN_ID_SENSOR || localHeader.Identifier == 0x00)
         {
-        	if (localHeader.Identifier == CAN_ID_SENSOR || localHeader.Identifier == 0x00)
-        	{
-            if (localHeader.DataLength == FDCAN_DLC_BYTES_8)
-            {
-                float tempYaw;
-                int32_t tempTicks;
-                
-                // Safe memcpy
-                memcpy(&tempYaw, &localRxData[0], sizeof(float));
-                memcpy(&tempTicks, &localRxData[4], sizeof(int32_t));
-
-                // Validity Check: Only check floats for NaN. Integer ticks are always valid.
-                if (!isnan(tempYaw) && !isinf(tempYaw))
-                {
-                    SensorData_t data;
-                    data.yaw = tempYaw;
-                    data.ticks = tempTicks;
-
-                    // Send to Queue
-                    osMessageQueuePut(sensorQueueHandle, &data, 0, 0);
-                }
-            }
-        	}
-        	else if (localHeader.Identifier == CAN_ID_CAMERA)
+          if (localHeader.DataLength == FDCAN_DLC_BYTES_8)
           {
-              CameraData_t camData;
+            float tempYaw;
+            int32_t tempTicks;
+            
+            memcpy(&tempYaw, &localRxData[0], sizeof(float));
+            memcpy(&tempTicks, &localRxData[4], sizeof(int32_t));
 
-              camData.x     = (int16_t)((localRxData[0] << 8) | localRxData[1]);
-              camData.y     = (int16_t)((localRxData[2] << 8) | localRxData[3]);
-              camData.angle = (int16_t)((localRxData[4] << 8) | localRxData[5]);
+            if (!isnan(tempYaw) && !isinf(tempYaw))
+            {
+              SensorData_t data;
+              data.yaw = tempYaw;
+              data.ticks = tempTicks;
 
-              osMessageQueuePut(cameraQueueHandle, &camData, 0, 0);
+              osMessageQueuePut(sensorQueueHandle, &data, 0, 0);
+            }
           }
         }
+        else if (localHeader.Identifier == CAN_ID_CAMERA)
+        {
+          CameraData_t camData;
+
+          camData.x     = (int16_t)((localRxData[0] << 8) | localRxData[1]);
+          camData.y     = (int16_t)((localRxData[2] << 8) | localRxData[3]);
+          camData.angle = (int16_t)((localRxData[4] << 8) | localRxData[5]);
+
+          osMessageQueuePut(cameraQueueHandle, &camData, 0, 0);
+        }
+      }
     }
 }
 
@@ -260,7 +244,7 @@ int main(void)
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
-  // defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   telemetryTaskHandle = osThreadNew(StartTelemetryTask, NULL, &telemetryTask_attributes);
@@ -286,7 +270,6 @@ void StartMotionTask(void *argument)
 
   int32_t last_ticks = 0; 
   int32_t current_ticks = 0;
-  uint8_t wp_reached = 0; 
   
   osDelay(100);
   last_ticks = getTicks();
@@ -297,7 +280,7 @@ void StartMotionTask(void *argument)
   const float ALPHA_FILTER = 0.2f;
   
   TickType_t last_tick_time = xTaskGetTickCount();
-
+  motionState = STATE_RUNNING;
   for(;;)
   {
     TickType_t current_tick_time = xTaskGetTickCount();
@@ -307,27 +290,27 @@ void StartMotionTask(void *argument)
     if (actual_dt < 0.001f) actual_dt = DT_SECONDS;
     if (actual_dt > 0.1f)   actual_dt = DT_SECONDS;
 
-    if (osMessageQueueGet(sensorQueueHandle, &sensorData, NULL, 0) == osOK)
+    while (osMessageQueueGet(sensorQueueHandle, &sensorData, NULL, 0) == osOK)
     {
-        float raw_yaw = sensorData.yaw;
-        
-        float yaw_diff = raw_yaw - filtered_yaw;
-        if (yaw_diff > 180.0f) yaw_diff -= 360.0f;
-        if (yaw_diff < -180.0f) yaw_diff += 360.0f;
-        
-        filtered_yaw = filtered_yaw + ALPHA_FILTER * yaw_diff;
-        
-        while (filtered_yaw >= 180.0f) filtered_yaw -= 360.0f;
-        while (filtered_yaw < -180.0f) filtered_yaw += 360.0f;
-        
-        Global_Robot_Yaw = filtered_yaw;
-        Global_Robot_Ticks = sensorData.ticks;
+      float raw_yaw = sensorData.yaw;
+      
+      float yaw_diff = raw_yaw - filtered_yaw;
+      if (yaw_diff > 180.0f) yaw_diff -= 360.0f;
+      if (yaw_diff < -180.0f) yaw_diff += 360.0f;
+      
+      filtered_yaw = filtered_yaw + ALPHA_FILTER * yaw_diff;
+      
+      while (filtered_yaw >= 180.0f) filtered_yaw -= 360.0f;
+      while (filtered_yaw < -180.0f) filtered_yaw += 360.0f;
+      
+      Global_Robot_Yaw = filtered_yaw;
+      Global_Robot_Ticks = sensorData.ticks;
     }
 
-    if (osMessageQueueGet(cameraQueueHandle, &cameraData, NULL, 0) == osOK)
+    while (osMessageQueueGet(cameraQueueHandle, &cameraData, NULL, 0) == osOK)
     {
-        Global_Cam_X = (float)cameraData.x;
-        Global_Cam_Y = (float)cameraData.y;
+      Global_Cam_X = (float)cameraData.x;
+      Global_Cam_Y = (float)cameraData.y;
     }
 
     current_ticks = getTicks();
@@ -335,12 +318,12 @@ void StartMotionTask(void *argument)
     last_ticks = current_ticks;
 
     if (delta != 0) {
-        float circumference_cm = 2.0f * M_PI * WHEEL_RADIUS_M * 100.0f;
-        float revolutions = (float)delta / (float)TICKS_PER_REV;
-        float dist_cm = circumference_cm * revolutions;
-        
-        Global_Robot_X += dist_cm * cosf(Global_Robot_Yaw * DEG_TO_RAD);
-        Global_Robot_Y += dist_cm * sinf(Global_Robot_Yaw * DEG_TO_RAD);
+      float circumference_cm = 2.0f * M_PI * WHEEL_RADIUS_M * 100.0f;
+      float revolutions = (float)delta / (float)TICKS_PER_REV;
+      float dist_cm = circumference_cm * revolutions;
+      
+      Global_Robot_X += dist_cm * cosf(Global_Robot_Yaw * DEG_TO_RAD);
+      Global_Robot_Y += dist_cm * sinf(Global_Robot_Yaw * DEG_TO_RAD);
     }
 
     float target_x = robotMotion.target_x;
@@ -349,25 +332,50 @@ void StartMotionTask(void *argument)
     float dx_wp = target_x - Global_Robot_X;
     float dy_wp = target_y - Global_Robot_Y;
     float dist_to_wp = sqrtf(dx_wp*dx_wp + dy_wp*dy_wp);
+    float current_speed = gOdom.wheel_v_mps;
 
-    Motion_Update(&robotMotion, Global_Robot_X, Global_Robot_Y, Global_Robot_Yaw, actual_dt);
+    Motion_Update(&robotMotion, Global_Robot_X, Global_Robot_Y, Global_Robot_Yaw, current_speed, actual_dt);
 
-    if (dist_to_wp < TARGET_THRESHOLD && !wp_reached && !robotMotion.path_finished) {
-        setEscSpeed_us(1500);  
-        HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_SET); 
-        wp_reached = 1; 
-        
-        printf(">>> WAYPOINT %d ALCANZADO en (%.0f, %.0f)\r\n", 
-               robotMotion.current_wp_idx + 1, Global_Robot_X, Global_Robot_Y);
-        
-        osDelay(2000);
-        HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_RESET);
-        
-        Motion_NextWaypoint(&robotMotion);
-        wp_reached = 0;  
-    }
-    else if (dist_to_wp > TARGET_THRESHOLD + 5.0f) {
-        wp_reached = 0;
+    switch (motionState) {
+      case STATE_RUNNING:
+          Motion_Update(&robotMotion, Global_Robot_X, Global_Robot_Y, Global_Robot_Yaw, current_speed, actual_dt);
+          if (dist_to_wp < TARGET_THRESHOLD) {
+            setEscSpeed_us(1500); 
+            g_ctrl.v_cmd = 0.0f;
+            g_ctrl.delta_cmd = 0.0f; 
+            
+            HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_SET);
+            
+            printf(">>> REACHED WP %d at (%.1f, %.1f)\r\n", robotMotion.current_wp_idx + 1, Global_Robot_X, Global_Robot_Y);
+
+            motionState = STATE_WAITING;
+            waitStartTime = HAL_GetTick();
+          }
+          break;
+
+      case STATE_WAITING:
+          if (gOdom.wheel_v_mps > 0.1f) { 
+            setEscSpeed_us(1350); 
+          } 
+          else if (gOdom.wheel_v_mps < -0.1f) {
+            setEscSpeed_us(1650);
+          }
+          else {
+            setEscSpeed_us(1500);
+          }
+          
+          g_ctrl.v_cmd = 0.0f; // Update PID target to 0
+
+          if (HAL_GetTick() - waitStartTime >= 2000) {
+            HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_RESET);
+            Motion_NextWaypoint(&robotMotion);
+            if (robotMotion.path_finished) {
+                printf(">>> PATH FINISHED \r\n");
+            } else {
+                motionState = STATE_RUNNING;
+            }
+          }
+          break;
     }
 
     float dx_cam = target_x - Global_Cam_X;
@@ -391,17 +399,15 @@ void StartTelemetryTask(void *argument)
 {
   for(;;)
   {
-    printf("WP: %d/%d | Odo: (%.0f, %.0f) | Cam: (%.0f, %.0f) | LED: %d | Path: %s\r\n",
-           robotMotion.current_wp_idx + 1,
-           robotMotion.path_size,
-           Global_Robot_X, Global_Robot_Y,
-           Global_Cam_X, Global_Cam_Y,
-           HAL_GPIO_ReadPin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin),
-           robotMotion.path_finished ? "DONE" : "RUNNING");
+    printf("WP: %d/%d | Odo: (%.0f, %.0f, %.1f deg) | Cam: ... \r\n", 
+       robotMotion.current_wp_idx + 1,
+       robotMotion.path_size,
+       Global_Robot_X, Global_Robot_Y, Global_Robot_Yaw);
     
     osDelay(200);
   }
 }
+
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -441,7 +447,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
   /* USER CODE END Callback 1 */
 }
-
 
 void SystemClock_Config(void)
 {

@@ -53,22 +53,30 @@ typedef struct {
     int16_t angle;
 } CameraData_t;
 
+typedef struct {
+    float v_cmd;          
+    float delta_cmd;      
+} ControlCmd_t;
+
+typedef struct {
+    float wheel_v_mps;    
+} OdomMeasurement_t;
+
 // Servo Constants
-#define SERVO_PERIOD_US   20000.0f
-#define SERVO_MIN_US       544.0f
-#define SERVO_MAX_US      2400.0f
-#define SERVO_MOVE_MIN_MS   10
+#define SERVO_PERIOD_US       20000.0f
+#define SERVO_MOVE_MIN_MS       10
 #define SERVO_LIMIT_LEFT_DEG   30.0f
-#define SERVO_CENTER_DEG  110.0f
-#define SERVO_LIMIT_RIGHT_DEG  140.0f
+#define SERVO_CENTER_DEG      110.0f
+#define SERVO_LIMIT_RIGHT_DEG 140.0f
+#define SERVO_CENTER_PWM       1750.0f
+#define SERVO_MIN_PWM           544.0f
+#define SERVO_MAX_PWM          2400.0f
+#define SERVO_PWM_PER_DEG      ((SERVO_MAX_PWM - SERVO_MIN_PWM) / (SERVO_LIMIT_RIGHT_DEG - SERVO_LIMIT_LEFT_DEG))
 
 // Robot Constants
 #define TICKS_PER_REV      230
 #define WHEEL_RADIUS_M     0.0314f
 #define WHEEL_BASE         0.1365f
-
-#define SERVO_MAX_DEG 160.0f
-#define SERVO_MIN_DEG 30.0f
 
 #define APPROACH_DISTANCE    5.0f      
 #define FINAL_APPROACH_DIST  2.5f    
@@ -83,7 +91,7 @@ typedef struct {
 #define MAX_DT              0.1f      
 
 #define CAM_THRESHOLD    20.0f
-#define TARGET_THRESHOLD 25.0f
+#define TARGET_THRESHOLD 20.0f
 #define CAN_ID_SENSOR    0x30
 #define CAN_ID_CAMERA    0x35
 
@@ -91,5 +99,12 @@ typedef struct {
 #define MAX_STEER_ANGLE  0.4f          
 #define DEG_TO_RAD       (M_PI / 180.0f)
 #define RAD_TO_DEG       (180.0f / M_PI)
+
+#define ACTUATOR_FREQUENCY    50       
+#define KP_CONSTANT           0.5f      
+#define KI_CONSTANT           0.001f      
+#define MIN_VEL               0.3f      
+#define MAX_VEL               2000    
+#define M_PI                  3.14159265358979323846  
 
 #endif /* CONSTANTS_H */
