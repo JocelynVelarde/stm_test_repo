@@ -1,18 +1,8 @@
 #include "servo.h"
 #include "main.h"
+#include "constants.h"
 
 extern TIM_HandleTypeDef htim13;
-
-#define SERVO_PERIOD_US   20000.0f
-#define SERVO_MIN_US       544.0f
-#define SERVO_MAX_US      2400.0f
-
-#define SERVO_MOVE_MIN_MS   10
-
-#define SERVO_LIMIT_LEFT   0.0f
-#define SERVO_LIMIT_RIGHT  165.0f
-
-static uint32_t last_move_tick = 0U;
 
 static inline uint32_t us_to_ccr(float us)
 {
@@ -29,8 +19,8 @@ void Servo_SetPulse_us(uint16_t pulse_us)
 
 void Servo_SetAngleDegrees(float degrees)
 {
-	if (degrees < SERVO_LIMIT_LEFT) degrees = SERVO_LIMIT_LEFT;
-	if (degrees > SERVO_LIMIT_RIGHT) degrees = SERVO_LIMIT_RIGHT;
+	if (degrees < SERVO_LIMIT_LEFT_DEG) degrees = SERVO_LIMIT_LEFT_DEG;
+	if (degrees > SERVO_LIMIT_RIGHT_DEG) degrees = SERVO_LIMIT_RIGHT_DEG;
 
 	float us = SERVO_MIN_US +
 	               (degrees / 180.0f) * (SERVO_MAX_US - SERVO_MIN_US);
