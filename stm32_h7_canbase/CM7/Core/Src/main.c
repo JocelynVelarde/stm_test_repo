@@ -92,6 +92,11 @@ const osThreadAttr_t telemetryTask_attributes = {
 volatile float Global_Cam_X = 0.0f;
 volatile float Global_Cam_Y = 0.0f;
 volatile uint8_t Camera_Seen_Target = 0;
+volatile uint8_t LED_State = 0;
+float cameraOffsetX = 0.0f; 
+float cameraOffsetY = 0.0f;  
+uint8_t cameraCalibrated = 0;
+volatile uint8_t system_initialized = 0;
 
 // Motion Control Variables
 Motion_t robotMotion;
@@ -106,17 +111,13 @@ uint32_t waitStartTime = 0;
 volatile ControlCmd_t g_ctrl = {0.0f, 0.0f};
 volatile OdomMeasurement_t gOdom = {0.0f};
 
-// Variables de odometría de cámara
-float cameraOffsetX = 0.0f;  // Referencia inicial de cámara (ej: 60)
-float cameraOffsetY = 0.0f;  // Referencia inicial de cámara (ej: 70)
-uint8_t cameraCalibrated = 0; // Flag para indicar si la cámara fue calibrada
 
 // ORIGIN {163,62} FOR CAMERA
 Waypoint_t path[] = {
-    {-50.0f, 45.0f},
-    {-73.0f, 0.0f},
-    {-85.0f, -35.0f},
-  	{-130.0f, 0.0f}
+    {66.0f, 38.0f},
+    {100.0f, -10.0f},
+    {100.0f, -45.0f},
+  	{140.0f, -10.0f}
 };
 int total_waypoints = sizeof(path) / sizeof(path[0]);
 int current_wp_idx = 0;
@@ -703,6 +704,13 @@ void StartMotionTask(void *argument)
   TickType_t last_tick_time = xTaskGetTickCount();
   for(;;)
   {
+    if (!system_initialized)
+    {
+      Motion_Stop(&robotMotion);
+      osDelay(TASK_PERIOD_MS);
+      continue;
+    }
+    
     TickType_t current_tick_time = xTaskGetTickCount();
     float actual_dt = (float)(current_tick_time - last_tick_time) / (float)configTICK_RATE_HZ;
     last_tick_time = current_tick_time;
@@ -738,6 +746,7 @@ void StartMotionTask(void *argument)
         cameraOffsetY = Global_Cam_Y;
         cameraCalibrated = 1;
         printf(">>> CAMERA CALIBRATED at (%.0f, %.0f)\r\n", cameraOffsetX, cameraOffsetY);
+        sendHC(">>> CAMERA CALIBRATED at (%.0f, %.0f)\r\n", cameraOffsetX, cameraOffsetY);
       }
     }
     if (currentOdomMode == ODOM_MODE_LOCAL)
@@ -764,7 +773,7 @@ void StartMotionTask(void *argument)
     {
       if (cameraCalibrated)
       {
-        float camera_pos_x = Global_Cam_X - cameraOffsetX;
+        float camera_pos_x = -(Global_Cam_X - cameraOffsetX);
         float camera_pos_y = Global_Cam_Y - cameraOffsetY;
         
         Global_Robot_X = camera_pos_x;
@@ -779,6 +788,8 @@ void StartMotionTask(void *argument)
           prev_cam_x = camera_pos_x;
           prev_cam_y = camera_pos_y;
         }
+      }else{
+        Motion_Stop(&robotMotion);
       }
     }
 
@@ -792,27 +803,43 @@ void StartMotionTask(void *argument)
 
     Motion_Update(&robotMotion, Global_Robot_X, Global_Robot_Y, Global_Robot_Yaw, current_speed, actual_dt);
 
-    if (dist_to_wp < TARGET_THRESHOLD) {
-        HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_SET);
-        osDelay(500);
-        HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_RESET);
+    LED_State = 0;
+    if (currentOdomMode == ODOM_MODE_LOCAL) {
+        if (dist_to_wp < TARGET_THRESHOLD) {
+            HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_SET);
+            LED_State = 1;
+            osDelay(500);
+            HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_RESET);
+            LED_State = 0;
 
-        printf(">>> REACHED WP %d at (%.1f, %.1f)\r\n", robotMotion.current_wp_idx + 1, Global_Robot_X, Global_Robot_Y);
+            printf(">>> REACHED WP %d at (%.1f, %.1f) [LOCAL ODOM]\r\n", robotMotion.current_wp_idx + 1, Global_Robot_X, Global_Robot_Y);
 
-        Motion_NextWaypoint(&robotMotion);
-        if (robotMotion.path_finished) {
-            printf(">>> PATH FINISHED \r\n");
+            Motion_NextWaypoint(&robotMotion);
+            if (robotMotion.path_finished) {
+                printf(">>> PATH FINISHED \r\n");
+            }
         }
     }
+    else if (currentOdomMode == ODOM_MODE_CAMERA) {
+        float dx_cam = target_x - Global_Cam_X;
+        float dy_cam = target_y - Global_Cam_Y;
+        float dist_cam = sqrtf(dx_cam*dx_cam + dy_cam*dy_cam);
 
-    float dx_cam = target_x - Global_Cam_X;
-    float dy_cam = target_y - Global_Cam_Y;
-    float dist_cam = sqrtf(dx_cam*dx_cam + dy_cam*dy_cam);
+        if (dist_cam < CAMERA_WAYPOINT_THRESHOLD) {
+            HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_SET);
+            LED_State = 1;
+            osDelay(500);
+            HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_RESET);
+            LED_State = 0;
 
-    if (dist_cam < CAM_THRESHOLD) {
-        HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_SET);
-    } else {
-        HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_RESET);
+            printf(">>> REACHED WP %d at Cam(%.1f, %.1f) Odo(%.1f, %.1f) [CAMERA ODOM]\r\n", 
+                   robotMotion.current_wp_idx + 1, Global_Cam_X, Global_Cam_Y, Global_Robot_X, Global_Robot_Y);
+
+            Motion_NextWaypoint(&robotMotion);
+            if (robotMotion.path_finished) {
+                printf(">>> PATH FINISHED \r\n");
+            }
+        }
     }
 
     osDelay(TASK_PERIOD_MS); 
@@ -826,17 +853,28 @@ void StartTelemetryTask(void *argument)
 {
   for(;;)
   {
-    printf("WP: %d/%d | Odo: (%.0f, %.0f, %.1f deg) | Cam: (%.0f, %.0f) \r\n", 
+    const char* initStatus = system_initialized ? "INICIALIZADO" : "ESPERANDO";
+    const char* camStatus = cameraCalibrated ? "OK" : "NO_CALIBRADA";
+    
+    printf("[%s | Cam:%s] WP: %d/%d | LED: %d | Odo: (%.0f, %.0f, %.1f deg) | Cam: (%.0f, %.0f)\r\n", 
+       initStatus,
+       camStatus,
        robotMotion.current_wp_idx + 1,
        robotMotion.path_size,
+       LED_State,
        Global_Robot_X, Global_Robot_Y, Global_Robot_Yaw,
-       Global_Cam_X, Global_Cam_Y);
+       Global_Cam_X, Global_Cam_Y
+       );
 
-    sendHC("WP: %d/%d | Odo: (%.0f, %.0f, %.1f deg) | Cam: (%.0f, %.0f) \r\n", 
+    sendHC("[%s | Cam:%s] WP: %d/%d | LED: %d | Odo: (%.0f, %.0f, %.1f deg) | Cam: (%.0f, %.0f)\r\n", 
+       initStatus,
+       camStatus,
        robotMotion.current_wp_idx + 1,
        robotMotion.path_size,
+       LED_State,
        Global_Robot_X, Global_Robot_Y, Global_Robot_Yaw,
-       Global_Cam_X, Global_Cam_Y); 
+       Global_Cam_X, Global_Cam_Y
+       ); 
     osDelay(200);
   }
 }
@@ -853,10 +891,42 @@ void StartTelemetryTask(void *argument)
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN 5 */
+  printf(">>> SISTEMA EN ESPERA DE INICIALIZACION\r\n");
+  sendHC(">>> SISTEMA EN ESPERA DE INICIALIZACION\r\n");
+  
   for(;;)
   {
+    // Parpadeo lento mientras espera inicialización
     HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
     osDelay(1000);
+    
+    // Verifica si hay datos recibidos por Bluetooth
+    const char* btData = HC05_GetData();
+    if (btData != NULL && strlen(btData) > 0)
+    {
+      // Verifica si recibió 'r' (comando de inicio)
+      if (btData[0] == 'r' || btData[0] == 'R')
+      {
+        if (cameraCalibrated)
+        {
+          // Cámara está inicializada, inicia el movimiento
+          system_initialized = 1;
+          robotMotion.current_wp_idx = 0;  // Reinicia al primer waypoint
+          robotMotion.path_finished = 0;   // Resetea el flag de ruta terminada
+          printf(">>> CAMARA INICIALIZADA - INICIANDO MOVIMIENTO\r\n");
+          sendHC(">>> CAMARA INICIALIZADA - INICIANDO MOVIMIENTO\r\n");
+        }
+        else
+        {
+          // Cámara no está inicializada, envía mensaje de error
+          printf(">>> CAMARA AUN NO INICIALIZADA\r\n");
+          sendHC(">>> CAMARA AUN NO INICIALIZADA\r\n");
+        }
+        
+        // Limpia el buffer para la siguiente lectura
+        memset((char*)btData, 0, BUFFER_SIZE);
+      }
+    }
   }
   /* USER CODE END 5 */
 }
