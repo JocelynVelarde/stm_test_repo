@@ -27,9 +27,9 @@ void Motion_Init(Motion_t *m)
     m->current_wp_idx = 0;
     m->path_finished = 0;
 
-    m->Kp = 1.5f;
+    m->Kp = 1.0f;
     m->Ki = 0.0f;
-    m->Kd = 0.01f;
+    m->Kd = 0.0f;
 
     m->prev_error = 0;
     m->integral_error = 0;
@@ -94,8 +94,8 @@ void Motion_Update(Motion_t *m, float current_x, float current_y, float current_
     float dx = m->target_x - current_x;
     float dy = m->target_y - current_y;
     float dist = sqrtf(dx*dx + dy*dy);
-
     float delta_rad;
+    
     if (m->path && m->path_size > 1) {
         delta_rad = pure_pursuit_compute_delta(current_x, current_y, current_yaw, 
                                               m->path, m->path_size, m->current_wp_idx);
@@ -105,54 +105,35 @@ void Motion_Update(Motion_t *m, float current_x, float current_y, float current_
     }
     
     float delta_deg = delta_rad * RAD_TO_DEG;
-    float error = delta_deg;
-    
-    m->integral_error += error * dt;
-    if (m->integral_error > INTEGRAL_MAX_LIMIT)  m->integral_error = INTEGRAL_MAX_LIMIT;
-    if (m->integral_error < INTEGRAL_MIN_LIMIT)  m->integral_error = INTEGRAL_MIN_LIMIT;
-    
-    float P = m->Kp * error;
-    float I = m->Ki * m->integral_error;
-    float D = m->Kd * (error - m->prev_error) / dt;
-    m->prev_error = error;
 
-    float final_servo_angle = m->servo_center_deg + (P + I + D);
+    float final_servo_angle = m->servo_center_deg + delta_deg;
     if (final_servo_angle > SERVO_LIMIT_RIGHT_DEG) final_servo_angle = SERVO_LIMIT_RIGHT_DEG;
     if (final_servo_angle < SERVO_LIMIT_LEFT_DEG) final_servo_angle = SERVO_LIMIT_LEFT_DEG;
     Servo_SetAngleDegrees(final_servo_angle);
 
-    uint16_t motor_speed;
+    uint16_t target_speed = CRUISE_SPEED_US;
+    float abs_steer = fabsf(delta_deg);
 
-    #define ESC_NEUTRAL 1500
-    #define ESC_BRAKE   1350  
-    #define ESC_CRAWL   1650
-    
+    if (abs_steer > 10.0f) {
+        float corner_factor = (abs_steer - 10.0f) / 15.0f; 
+        if (corner_factor > 1.0f) corner_factor = 1.0f;
+
+        target_speed = (uint16_t)(CRUISE_SPEED_US - (corner_factor * (CRUISE_SPEED_US - ESC_CRAWL)));
+    }
+
+    uint16_t dist_speed = CRUISE_SPEED_US;
     if (dist < FINAL_APPROACH_DIST) {
-        
-        if (current_speed_mps > 0.1f) {
-            motor_speed = ESC_BRAKE; 
-        } 
-        else if (current_speed_mps < -0.05f) {
-             motor_speed = 1650; 
-        }
-        else {
-            motor_speed = ESC_CRAWL; 
-        }
+        if (current_speed_mps > 0.1f) dist_speed = ESC_BRAKE;
+        else dist_speed = ESC_NEUTRAL;
     } 
     else if (dist < APPROACH_DISTANCE) {
         float blend = dist / APPROACH_DISTANCE;
-        motor_speed = (uint16_t)(APPROACH_SPEED_US + blend * (CRUISE_SPEED_US - APPROACH_SPEED_US));
-    } 
-    else {
-        motor_speed = CRUISE_SPEED_US;
+        dist_speed = (uint16_t)(APPROACH_SPEED_US + blend * (CRUISE_SPEED_US - APPROACH_SPEED_US));
     }
-    
-    if (fabsf(delta_deg) > 25.0f) {
-        if (current_speed_mps > 1.0f) motor_speed = ESC_BRAKE;
-        else motor_speed = (uint16_t)(motor_speed * 0.8f);
-    }
-    
-    setEscSpeed_us(motor_speed);
+
+    if (dist_speed < target_speed) target_speed = dist_speed;
+
+    setEscSpeed_us(target_speed);
 }
 
 static float pure_pursuit_compute_delta(float current_x, float current_y, float current_yaw, Waypoint_t path[], int path_size, int current_wp)

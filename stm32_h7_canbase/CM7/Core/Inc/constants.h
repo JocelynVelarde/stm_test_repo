@@ -62,6 +62,16 @@ typedef struct {
     float wheel_v_mps;    
 } OdomMeasurement_t;
 
+typedef enum {
+    STATE_RUNNING,
+    STATE_WAITING
+} RobotState_t;
+
+typedef enum {
+    ODOM_MODE_LOCAL,
+    ODOM_MODE_CAMERA   
+} OdomMode_t;
+
 // Servo Constants
 #define SERVO_PERIOD_US       20000.0f
 #define SERVO_MOVE_MIN_MS       10
@@ -76,35 +86,39 @@ typedef struct {
 // Robot Constants
 #define TICKS_PER_REV      230
 #define WHEEL_RADIUS_M     0.0314f
-#define WHEEL_BASE         0.1365f
+// #define WHEEL_BASE         0.1365f
+#define WHEEL_BASE         0.50
 
-#define APPROACH_DISTANCE    5.0f      
-#define FINAL_APPROACH_DIST  2.5f    
-#define CRUISE_SPEED_US      1750      
-#define APPROACH_SPEED_US    1650     
+#define APPROACH_DISTANCE    10.0f      
+#define FINAL_APPROACH_DIST  5.0f    
+#define CRUISE_SPEED_US      1800      
+#define APPROACH_SPEED_US    1720     
 #define FINAL_SPEED_US       1550      
 #define STOP_SPEED_US        1500
+#define ESC_NEUTRAL 1500
+#define ESC_CRAWL   1800
+#define ESC_BRAKE   1350  
 
 #define INTEGRAL_MAX_LIMIT   50.0f
 #define INTEGRAL_MIN_LIMIT  -50.0f
 #define MIN_DT              0.001f      
 #define MAX_DT              0.1f      
 
-#define CAM_THRESHOLD    20.0f
-#define TARGET_THRESHOLD 20.0f
+#define CAM_THRESHOLD    10.0f
+#define TARGET_THRESHOLD 2.0f
 #define CAN_ID_SENSOR    0x30
 #define CAN_ID_CAMERA    0x35
 
-#define LOOKAHEAD_DIST   0.5f          
-#define MAX_STEER_ANGLE  0.4f          
+#define LOOKAHEAD_DIST   15.0f          
+#define MAX_STEER_ANGLE  1.0f          
 #define DEG_TO_RAD       (M_PI / 180.0f)
 #define RAD_TO_DEG       (180.0f / M_PI)
 
-#define ACTUATOR_FREQUENCY    50       
-#define KP_CONSTANT           0.5f      
-#define KI_CONSTANT           0.001f      
+#define ACTUATOR_FREQUENCY    50           
 #define MIN_VEL               0.3f      
 #define MAX_VEL               2000    
 #define M_PI                  3.14159265358979323846  
+#define BUFFER_SIZE 		100
+
 
 #endif /* CONSTANTS_H */
