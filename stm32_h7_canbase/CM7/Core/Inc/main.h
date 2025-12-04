@@ -49,6 +49,8 @@ extern "C" {
 
 /* USER CODE END EM */
 
+void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
+
 /* Exported functions prototypes ---------------------------------------------*/
 void Error_Handler(void);
 
@@ -67,6 +69,8 @@ void Error_Handler(void);
 #define STLINK_RX_GPIO_Port GPIOD
 #define STLINK_TX_Pin GPIO_PIN_9
 #define STLINK_TX_GPIO_Port GPIOD
+#define FLAG_INDICATOR_Pin GPIO_PIN_8
+#define FLAG_INDICATOR_GPIO_Port GPIOC
 #define FDCAN1_RX_Pin GPIO_PIN_0
 #define FDCAN1_RX_GPIO_Port GPIOD
 #define FDCAN1_TX_Pin GPIO_PIN_1

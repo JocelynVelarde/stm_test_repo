@@ -2,62 +2,127 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2022 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
+  * @brief          : Main program body (FreeRTOS + CAN Ticks/Yaw)
   ******************************************************************************
   */
-// THIS IS A COMMIT TEST
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "cmsis_os.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "myprintf.h"
+#include "myprintf.h" 
+#include "servo.h"
+#include "motion.h"   
+#include "constants.h"
+#include "hc_05.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <math.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
 #ifndef HSEM_ID_0
-#define HSEM_ID_0 (0U) /* HW semaphore 0*/
+#define HSEM_ID_0 (0U)
 #endif
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
 
 FDCAN_HandleTypeDef hfdcan1;
-
-UART_HandleTypeDef huart3;
-
-/* USER CODE BEGIN PV */
 FDCAN_FilterTypeDef sFilterConfig;
 FDCAN_TxHeaderTypeDef TxHeader;
-FDCAN_RxHeaderTypeDef RxHeader;
-uint8_t TxData[8] = {0x10, 0x34, 0x54, 0x76, 0x98, 0x00, 0x11, 0x22};
-uint8_t RxData[8];
-float currentYaw = 0.0f;
-float currentDist = 0.0f;
-int32_t currentTicks = 0;
+
+TIM_HandleTypeDef htim2;
+TIM_HandleTypeDef htim13;
+
+UART_HandleTypeDef huart3;
+UART_HandleTypeDef huart6;
+
+/* Definitions for defaultTask */
+osThreadId_t defaultTaskHandle;
+const osThreadAttr_t defaultTask_attributes = {
+  .name = "defaultTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* USER CODE BEGIN PV */
+// --- FreeRTOS Handles ---
+osMutexId_t printfMutexHandle;
+const osMutexAttr_t printfMutex_attributes = {
+  .name = "PrintfMutex"
+};
+
+osMessageQueueId_t sensorQueueHandle;
+const osMessageQueueAttr_t sensorQueue_attributes = {
+  .name = "SensorQueue"
+};
+
+osMessageQueueId_t cameraQueueHandle;
+const osMessageQueueAttr_t cameraQueue_attributes = {
+  .name = "CameraQueue"
+};
+
+osThreadId_t motionTaskHandle;
+const osThreadAttr_t motionTask_attributes = {
+  .name = "MotionTask",
+  .stack_size = 512 * 4, 
+  .priority = (osPriority_t) osPriorityAboveNormal,
+};
+
+osThreadId_t telemetryTaskHandle;
+const osThreadAttr_t telemetryTask_attributes = {
+  .name = "TelemetryTask",
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+
+// Camera State
+volatile float Global_Cam_X = 0.0f;
+volatile float Global_Cam_Y = 0.0f;
+volatile uint8_t Camera_Seen_Target = 0;
+volatile uint8_t LED_State = 0;
+float cameraOffsetX = 0.0f; 
+float cameraOffsetY = 0.0f;  
+uint8_t cameraCalibrated = 0;
+volatile uint8_t system_initialized = 0;
+
+// Motion Control Variables
+Motion_t robotMotion;
+RobotState_t motionState = STATE_RUNNING;
+OdomMode_t currentOdomMode = ODOM_MODE_CAMERA;  
+
+float Global_Robot_X = 0.0f;
+float Global_Robot_Y = 0.0f;
+volatile float Global_Robot_Yaw = 0.0f;   
+volatile int32_t Global_Robot_Ticks = 0;  
+uint32_t waitStartTime = 0;
+volatile ControlCmd_t g_ctrl = {0.0f, 0.0f};
+volatile OdomMeasurement_t gOdom = {0.0f};
+
+
+// ORIGIN {163,62} FOR CAMERA
+Waypoint_t path[] = {
+    {20.0f, 0.0f},
+    {60.0f, 20.0f},
+    {90.0f, 25.0f},
+  	{120.0f, 30.0f}
+};
+
+int total_waypoints = sizeof(path) / sizeof(path[0]);
+int current_wp_idx = 0;
+uint8_t finished_path = 0;
 
 /* USER CODE END PV */
 
@@ -66,80 +131,66 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_FDCAN1_Init(void);
-/* USER CODE BEGIN PFP */
-void CAN_Process_Messages(void);
-float getYaw(void);
-float getDistance(void);
-int32_t getTicks(void);
+static void MX_TIM13_Init(void);
+static void MX_TIM2_Init(void);
+static void MX_USART6_UART_Init(void);
+void StartDefaultTask(void *argument);
 
+/* USER CODE BEGIN PFP */
+void StartMotionTask(void *argument);
+void StartTelemetryTask(void *argument);
+void StartActuatorTask(void *argument);
+void setEscSpeed_us(uint16_t pulse_us);
+int32_t getTicks(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
-// --- 1. The Processing Engine ---
-// Call this as often as possible to keep data fresh
-void CAN_Process_Messages(void)
+void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 {
-	FDCAN_RxHeaderTypeDef localHeader;
-		 	        int ret;
+    if((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) != RESET)
+    {
+      FDCAN_RxHeaderTypeDef localHeader;
+      uint8_t localRxData[8];
+      if (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &localHeader, localRxData) == HAL_OK)
+      {
+        if (localHeader.Identifier == CAN_ID_SENSOR || localHeader.Identifier == 0x00)
+        {
+          if (localHeader.DataLength == FDCAN_DLC_BYTES_8)
+          {
+            float tempYaw;
+            int32_t tempTicks;
+            
+            memcpy(&tempYaw, &localRxData[0], sizeof(float));
+            memcpy(&tempTicks, &localRxData[4], sizeof(int32_t));
 
+            if (!isnan(tempYaw) && !isinf(tempYaw))
+            {
+              SensorData_t data;
+              data.yaw = tempYaw;
+              data.ticks = tempTicks;
 
-		 	        ret = HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &localHeader, RxData);
+              osMessageQueuePut(sensorQueueHandle, &data, 0, 0);
+            }
+          }
+        }
+        else if (localHeader.Identifier == CAN_ID_CAMERA)
+        {
+          CameraData_t camData;
 
-		 	        /* Process all available messages */
-		 	                while (ret == HAL_OK) {
-		 	                    uint8_t dlc_bytes;
-		 	                    if (localHeader.DataLength > 0x0F) {
-		 	                        dlc_bytes = (localHeader.DataLength >> 16) & 0x0F;
-		 	                    } else {
-		 	                        dlc_bytes = (uint8_t)localHeader.DataLength;
-		 	                    }
+          camData.x     = (int16_t)((localRxData[0] << 8) | localRxData[1]);
+          camData.y     = (int16_t)((localRxData[2] << 8) | localRxData[3]);
+          camData.angle = (int16_t)((localRxData[4] << 8) | localRxData[5]);
 
-		 	                    //printf("RECV: ID=0x%lX | DLC=%u", localHeader.Identifier, dlc_bytes);
-
-		 	                   if (dlc_bytes >= 4) {
-		 	                                   // This is 'Yaw' for ID 0x40, or 'Distance' for ID 0x30
-		 	                                   union { float f; uint8_t b[4]; } conv;
-		 	                                   conv.b[0] = RxData[0];
-		 	                                   conv.b[1] = RxData[1];
-		 	                                   conv.b[2] = RxData[2];
-		 	                                   conv.b[3] = RxData[3];
-		 	                                   float val1 = conv.f;
-
-		 	                                   // --- Handle ID 0x40 (Yaw Only) ---
-		 	                                   if (localHeader.Identifier == 0x40) {
-		 	                                       //printf("IMU  | Yaw=%.2f", val1);
-		 	                                      currentYaw = val1;
-		 	                                   }
-
-		 	                                   // --- Handle ID 0x30 (Distance + Tick) ---
-		 	                                   else if (localHeader.Identifier == 0x30 && dlc_bytes >= 8) {
-		 	                                       int32_t encoderTick;
-		 	                                       memcpy(&encoderTick, &RxData[4], sizeof(int32_t));
-
-		 	                                       //printf("ENCO | Dist=%.2f cm | Tick=%ld", val1, encoderTick);
-		 	                                      currentDist = val1;
-		 	                                      currentTicks = encoderTick;
-		 	                                   }
-		 	                               }
-		 	                    //printf("\r\n");
-		 	                    ret = HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &localHeader, RxData);
-		 	                }
-
+          osMessageQueuePut(cameraQueueHandle, &camData, 0, 0);
+        }
+      }
+    }
 }
 
-// --- 2. The Getter Functions ---
-float getYaw(void) {
-    return currentYaw;
-}
-
-float getDistance(void) {
-    return currentDist;
-}
-
-int32_t getTicks(void) {
-    return currentTicks;
+int32_t getTicks(void)
+{
+    return Global_Robot_Ticks; 
 }
 
 /* USER CODE END 0 */
@@ -152,20 +203,15 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
   /* USER CODE END 1 */
 /* USER CODE BEGIN Boot_Mode_Sequence_0 */
   int32_t timeout;
 /* USER CODE END Boot_Mode_Sequence_0 */
 
 /* USER CODE BEGIN Boot_Mode_Sequence_1 */
-  /* Wait until CPU2 boots and enters in stop mode or timeout*/
   timeout = 0xFFFF;
   while((__HAL_RCC_GET_FLAG(RCC_FLAG_D2CKRDY) != RESET) && (timeout-- > 0));
-  if ( timeout < 0 )
-  {
-  Error_Handler();
-  }
+  if ( timeout < 0 ) { Error_Handler(); }
 /* USER CODE END Boot_Mode_Sequence_1 */
   /* MCU Configuration--------------------------------------------------------*/
 
@@ -179,21 +225,12 @@ int main(void)
   /* Configure the system clock */
   SystemClock_Config();
 /* USER CODE BEGIN Boot_Mode_Sequence_2 */
-/* When system initialization is finished, Cortex-M7 will release Cortex-M4 by means of
-HSEM notification */
-/*HW semaphore Clock enable*/
-__HAL_RCC_HSEM_CLK_ENABLE();
-/*Take HSEM */
-HAL_HSEM_FastTake(HSEM_ID_0);
-/*Release HSEM in order to notify the CPU2(CM4)*/
-HAL_HSEM_Release(HSEM_ID_0,0);
-/* wait until CPU2 wakes up from stop mode */
-timeout = 0xFFFF;
-while((__HAL_RCC_GET_FLAG(RCC_FLAG_D2CKRDY) == RESET) && (timeout-- > 0));
-if ( timeout < 0 )
-{
-Error_Handler();
-}
+  __HAL_RCC_HSEM_CLK_ENABLE();
+  HAL_HSEM_FastTake(HSEM_ID_0);
+  HAL_HSEM_Release(HSEM_ID_0,0);
+  timeout = 0xFFFF;
+  while((__HAL_RCC_GET_FLAG(RCC_FLAG_D2CKRDY) == RESET) && (timeout-- > 0));
+  if ( timeout < 0 ) { Error_Handler(); }
 /* USER CODE END Boot_Mode_Sequence_2 */
 
   /* USER CODE BEGIN SysInit */
@@ -204,24 +241,64 @@ Error_Handler();
   MX_GPIO_Init();
   MX_USART3_UART_Init();
   MX_FDCAN1_Init();
+  MX_TIM13_Init();
+  MX_TIM2_Init();
+  MX_USART6_UART_Init();
   /* USER CODE BEGIN 2 */
+  HAL_TIM_PWM_Start(&htim13, TIM_CHANNEL_1); // Servo
+  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);  // ESC
 
+  Motion_Init(&robotMotion);
+  Motion_SetPath(&robotMotion, path, total_waypoints);
+  startHCrx(&huart6);
   /* USER CODE END 2 */
+
+  /* Init scheduler */
+  osKernelInitialize();
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  printfMutexHandle = osMutexNew(&printfMutex_attributes);
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  sensorQueueHandle = osMessageQueueNew(1, sizeof(SensorData_t), &sensorQueue_attributes);
+  cameraQueueHandle = osMessageQueueNew(1, sizeof(CameraData_t), &cameraQueue_attributes);
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* creation of defaultTask */
+  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  telemetryTaskHandle = osThreadNew(StartTelemetryTask, NULL, &telemetryTask_attributes);
+  motionTaskHandle = osThreadNew(StartMotionTask, NULL, &motionTask_attributes);
+  /* USER CODE END RTOS_THREADS */
+
+  /* USER CODE BEGIN RTOS_EVENTS */
+  /* add events, ... */
+  /* USER CODE END RTOS_EVENTS */
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	        CAN_Process_Messages();
-	        float myYaw = getYaw();
-	        float myDist = getDistance();
-	        int32_t myTicks = getTicks();
-	        printf("VALORES -> Yaw: %.2f | Dist: %.2f | Ticks: %ld\r\n", myYaw, myDist, myTicks);
-
-  }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+  }
   /* USER CODE END 3 */
 }
 
@@ -236,11 +313,11 @@ void SystemClock_Config(void)
 
   /** Supply configuration update enable
   */
-  HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
+  HAL_PWREx_ConfigSupply(PWR_DIRECT_SMPS_SUPPLY);
 
   /** Configure the main internal regulator output voltage
   */
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE0);
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
   while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
@@ -253,9 +330,9 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
   RCC_OscInitStruct.PLL.PLLM = 4;
-  RCC_OscInitStruct.PLL.PLLN = 60;
+  RCC_OscInitStruct.PLL.PLLN = 50;
   RCC_OscInitStruct.PLL.PLLP = 2;
-  RCC_OscInitStruct.PLL.PLLQ = 24;
+  RCC_OscInitStruct.PLL.PLLQ = 8;
   RCC_OscInitStruct.PLL.PLLR = 2;
   RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_3;
   RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1VCOWIDE;
@@ -278,7 +355,7 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV2;
   RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV2;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
   {
     Error_Handler();
   }
@@ -305,7 +382,7 @@ static void MX_FDCAN1_Init(void)
   hfdcan1.Init.AutoRetransmission = DISABLE;
   hfdcan1.Init.TransmitPause = DISABLE;
   hfdcan1.Init.ProtocolException = ENABLE;
-  hfdcan1.Init.NominalPrescaler = 2;
+  hfdcan1.Init.NominalPrescaler = 5;
   hfdcan1.Init.NominalSyncJumpWidth = 8;
   hfdcan1.Init.NominalTimeSeg1 = 0x1F;
   hfdcan1.Init.NominalTimeSeg2 = 8;
@@ -339,35 +416,122 @@ static void MX_FDCAN1_Init(void)
   sFilterConfig.FilterID1 = 0x000;
   sFilterConfig.FilterID2 = 0x000;
 
-  /* Configure global filter to reject all non-matching frames */
   HAL_FDCAN_ConfigGlobalFilter(&hfdcan1, FDCAN_REJECT, FDCAN_REJECT, FDCAN_REJECT_REMOTE, FDCAN_REJECT_REMOTE);
 
   if (HAL_FDCAN_ConfigFilter(&hfdcan1, &sFilterConfig) != HAL_OK)
     {
-       /* Filter configuration Error */
        Error_Handler();
     }
-   /* Start the FDCAN module */
   if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK) {
     }
-       /* Start Error */
   if (HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0) != HAL_OK) {
     }
-       /* Notification Error */
 
-   /* Configure Tx buffer message */
-  TxHeader.Identifier = 0x111;
-  TxHeader.IdType = FDCAN_STANDARD_ID;
-  TxHeader.TxFrameType = FDCAN_DATA_FRAME;
-  TxHeader.DataLength = FDCAN_DLC_BYTES_8 ;
-  TxHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
-  TxHeader.BitRateSwitch = FDCAN_BRS_ON;
-  TxHeader.FDFormat = FDCAN_FD_CAN;
-  TxHeader.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
-  TxHeader.MessageMarker = 0x00;
-
-
+   TxHeader.Identifier = 0x111;
+   TxHeader.IdType = FDCAN_STANDARD_ID;
+   TxHeader.TxFrameType = FDCAN_DATA_FRAME;
+   TxHeader.DataLength = FDCAN_DLC_BYTES_8 ;
+   TxHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+   TxHeader.BitRateSwitch = FDCAN_BRS_ON;
+   TxHeader.FDFormat = FDCAN_FD_CAN;
+   TxHeader.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
+   TxHeader.MessageMarker = 0x00;
   /* USER CODE END FDCAN1_Init 2 */
+
+}
+
+/**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 199;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 19999;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  if (HAL_TIM_PWM_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 1500;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
+  HAL_TIM_MspPostInit(&htim2);
+
+}
+
+/**
+  * @brief TIM13 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM13_Init(void)
+{
+
+  /* USER CODE BEGIN TIM13_Init 0 */
+
+  /* USER CODE END TIM13_Init 0 */
+
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM13_Init 1 */
+
+  /* USER CODE END TIM13_Init 1 */
+  htim13.Instance = TIM13;
+  htim13.Init.Prescaler = 199;
+  htim13.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim13.Init.Period = 19999;
+  htim13.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim13.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  if (HAL_TIM_Base_Init(&htim13) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim13) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 1500;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim13, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM13_Init 2 */
+
+  /* USER CODE END TIM13_Init 2 */
+  HAL_TIM_MspPostInit(&htim13);
 
 }
 
@@ -420,6 +584,54 @@ static void MX_USART3_UART_Init(void)
 }
 
 /**
+  * @brief USART6 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART6_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART6_Init 0 */
+
+  /* USER CODE END USART6_Init 0 */
+
+  /* USER CODE BEGIN USART6_Init 1 */
+
+  /* USER CODE END USART6_Init 1 */
+  huart6.Instance = USART6;
+  huart6.Init.BaudRate = 9600;
+  huart6.Init.WordLength = UART_WORDLENGTH_8B;
+  huart6.Init.StopBits = UART_STOPBITS_1;
+  huart6.Init.Parity = UART_PARITY_NONE;
+  huart6.Init.Mode = UART_MODE_TX_RX;
+  huart6.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart6.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart6.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart6.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart6.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart6, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart6, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&huart6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART6_Init 2 */
+
+  /* USER CODE END USART6_Init 2 */
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -434,12 +646,15 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
-  __HAL_RCC_GPIOA_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, LD1_Pin|LD2_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : B1_Pin */
   GPIO_InitStruct.Pin = B1_Pin;
@@ -454,6 +669,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : FLAG_INDICATOR_Pin */
+  GPIO_InitStruct.Pin = FLAG_INDICATOR_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(FLAG_INDICATOR_GPIO_Port, &GPIO_InitStruct);
+
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
   /* USER CODE END MX_GPIO_Init_2 */
@@ -461,7 +683,257 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
+/**
+  * @brief  Motion Task: Handles Physics, PID, and ESC/Servo
+  */
+void StartMotionTask(void *argument)
+{
+  SensorData_t sensorData;
+  CameraData_t cameraData;
+
+  int32_t last_ticks = 0; 
+  int32_t current_ticks = 0;
+  
+  osDelay(100);
+  last_ticks = getTicks();
+
+  const uint32_t TASK_PERIOD_MS = 20;
+  const float DT_SECONDS = 0.02f; 
+  float filtered_yaw = 0.0f;
+  const float ALPHA_FILTER = 0.2f;
+  
+  TickType_t last_tick_time = xTaskGetTickCount();
+  for(;;)
+  {
+    TickType_t current_tick_time = xTaskGetTickCount();
+    float actual_dt = (float)(current_tick_time - last_tick_time) / (float)configTICK_RATE_HZ;
+    last_tick_time = current_tick_time;
+    
+    if (actual_dt < 0.001f) actual_dt = DT_SECONDS;
+    if (actual_dt > 0.1f)   actual_dt = DT_SECONDS;
+
+    while (osMessageQueueGet(sensorQueueHandle, &sensorData, NULL, 0) == osOK)
+    {
+      float raw_yaw = sensorData.yaw;
+      
+      float yaw_diff = raw_yaw - filtered_yaw;
+      if (yaw_diff > 180.0f) yaw_diff -= 360.0f;
+      if (yaw_diff < -180.0f) yaw_diff += 360.0f;
+      
+      filtered_yaw = filtered_yaw + ALPHA_FILTER * yaw_diff;
+      
+      while (filtered_yaw >= 180.0f) filtered_yaw -= 360.0f;
+      while (filtered_yaw < -180.0f) filtered_yaw += 360.0f;
+      
+      Global_Robot_Yaw = filtered_yaw;
+      Global_Robot_Ticks = sensorData.ticks;
+    }
+
+    while (osMessageQueueGet(cameraQueueHandle, &cameraData, NULL, 0) == osOK)
+    {
+      if (cameraData.x != -1 && cameraData.y != -1)
+      {
+        Global_Cam_X = (float)cameraData.x;
+        Global_Cam_Y = (float)cameraData.y;
+      }
+      
+      if (!cameraCalibrated && currentOdomMode == ODOM_MODE_CAMERA)
+      {
+        cameraOffsetX = Global_Cam_X;
+        cameraOffsetY = Global_Cam_Y;
+        cameraCalibrated = 1;
+        system_initialized = 1;  // Inicia automáticamente cuando la cámara se calibra
+        robotMotion.current_wp_idx = 0;  // Reinicia al primer waypoint
+        robotMotion.path_finished = 0;   // Resetea el flag de ruta terminada
+        printf(">>> CAMERA CALIBRATED at (%.0f, %.0f)\r\n", cameraOffsetX, cameraOffsetY);
+        printf(">>> INICIANDO MOVIMIENTO AUTOMATICAMENTE\r\n");
+        sendHC(">>> CAMERA CALIBRATED at (%.0f, %.0f)\r\n", cameraOffsetX, cameraOffsetY);
+        sendHC(">>> INICIANDO MOVIMIENTO AUTOMATICAMENTE\r\n");
+      }
+    }
+    
+    if (!system_initialized)
+    {
+      Motion_Stop(&robotMotion);
+      osDelay(TASK_PERIOD_MS);
+      continue;
+    }
+    if (currentOdomMode == ODOM_MODE_LOCAL)
+    {
+      current_ticks = getTicks();
+      int32_t delta = current_ticks - last_ticks;
+      last_ticks = current_ticks;
+
+      if (delta != 0) {
+        float circumference_cm = 2.0f * (float)M_PI * WHEEL_RADIUS_M * 100.0f;
+        float revolutions = (float)delta / (float)TICKS_PER_REV;
+        float dist_cm = circumference_cm * revolutions;
+        
+        Global_Robot_X += dist_cm * cosf(Global_Robot_Yaw * DEG_TO_RAD);
+        Global_Robot_Y += dist_cm * sinf(Global_Robot_Yaw * DEG_TO_RAD);
+        if (actual_dt > 0.0f) {
+            gOdom.wheel_v_mps = (dist_cm / 100.0f) / actual_dt;
+        }
+      } else {
+          gOdom.wheel_v_mps = 0.0f;
+      }
+    }
+    else if (currentOdomMode == ODOM_MODE_CAMERA)
+    {
+      if (cameraCalibrated)
+      {
+        float camera_pos_x = -(Global_Cam_X - cameraOffsetX);
+        float camera_pos_y = Global_Cam_Y - cameraOffsetY;
+        
+        Global_Robot_X = camera_pos_x;
+        Global_Robot_Y = camera_pos_y;
+        if (actual_dt > 0.0f) {
+          static float prev_cam_x = 0.0f;
+          static float prev_cam_y = 0.0f;
+          float dx = camera_pos_x - prev_cam_x;
+          float dy = camera_pos_y - prev_cam_y;
+          float dist_traveled = sqrtf(dx*dx + dy*dy);
+          gOdom.wheel_v_mps = dist_traveled / actual_dt;
+          prev_cam_x = camera_pos_x;
+          prev_cam_y = camera_pos_y;
+        }
+      }else{
+        Motion_Stop(&robotMotion);
+      }
+    }
+
+    float target_x = robotMotion.target_x;
+    float target_y = robotMotion.target_y;
+    
+    float dx_wp = target_x - Global_Robot_X;
+    float dy_wp = target_y - Global_Robot_Y;
+    float dist_to_wp = sqrtf(dx_wp*dx_wp + dy_wp*dy_wp);
+    float current_speed = gOdom.wheel_v_mps;
+
+    Motion_Update(&robotMotion, Global_Robot_X, Global_Robot_Y, Global_Robot_Yaw, current_speed, actual_dt);
+
+    LED_State = 0;
+    if (currentOdomMode == ODOM_MODE_LOCAL) {
+        if (dist_to_wp < TARGET_THRESHOLD) {
+            HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_SET);
+            LED_State = 1;
+            osDelay(500);
+            HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_RESET);
+            LED_State = 0;
+
+            printf(">>> REACHED WP %d at (%.1f, %.1f) [LOCAL ODOM]\r\n", robotMotion.current_wp_idx + 1, Global_Robot_X, Global_Robot_Y);
+
+            Motion_NextWaypoint(&robotMotion);
+            if (robotMotion.path_finished) {
+                printf(">>> PATH FINISHED \r\n");
+            }
+        }
+    }
+    else if (currentOdomMode == ODOM_MODE_CAMERA) {
+        float camera_world_x = cameraOffsetX - target_x;
+        float camera_world_y = cameraOffsetY + target_y;
+        
+        float dx_cam = camera_world_x - Global_Cam_X;
+        float dy_cam = camera_world_y - Global_Cam_Y;
+        float dist_cam = sqrtf(dx_cam*dx_cam + dy_cam*dy_cam);
+
+        if (dist_cam < CAMERA_WAYPOINT_THRESHOLD) {
+            HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_SET);
+            LED_State = 1;
+            printf(">>> REACHED WP %d at Cam(%.1f, %.1f) [Camera-based]\r\n", 
+                   robotMotion.current_wp_idx + 1, Global_Cam_X, Global_Cam_Y);
+
+            Motion_Stop(&robotMotion);
+            osDelay(2000);
+            HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_RESET);
+            LED_State = 0;
+
+            Motion_NextWaypoint(&robotMotion);
+            if (robotMotion.path_finished) {
+                printf(">>> PATH FINISHED \r\n");
+                Motion_Stop(&robotMotion);
+            }
+        }
+    }
+
+    osDelay(TASK_PERIOD_MS); 
+  }
+}
+
+/**
+  * @brief  Telemetry Task
+  */
+void StartTelemetryTask(void *argument)
+{
+  for(;;)
+  {
+    const char* initStatus = system_initialized ? "INICIALIZADO" : "ESPERANDO";
+    const char* camStatus = cameraCalibrated ? "OK" : "NO_CALIBRADA";
+    
+    printf("[%s | Cam:%s] WP: %d/%d | LED: %d | Odo: (%.0f, %.0f, %.1f deg) | Cam: (%.0f, %.0f)\r\n", 
+       initStatus,
+       camStatus,
+       robotMotion.current_wp_idx + 1,
+       robotMotion.path_size,
+       LED_State,
+       Global_Robot_X, Global_Robot_Y, Global_Robot_Yaw,
+       Global_Cam_X, Global_Cam_Y
+       );
+
+    sendHC("[%s | Cam:%s] WP: %d/%d | LED: %d | Odo: (%.0f, %.0f, %.1f deg) | Cam: (%.0f, %.0f)\r\n", 
+       initStatus,
+       camStatus,
+       robotMotion.current_wp_idx + 1,
+       robotMotion.path_size,
+       LED_State,
+       Global_Robot_X, Global_Robot_Y, Global_Robot_Yaw,
+       Global_Cam_X, Global_Cam_Y
+       ); 
+    osDelay(200);
+  }
+}
+
+// send values with uart2 ussing h05 
+
 /* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  */
+/* USER CODE END Header_StartDefaultTask */
+void StartDefaultTask(void *argument)
+{
+  /* USER CODE BEGIN 5 */
+  for(;;)
+  {
+    HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+    osDelay(1000);
+  }
+  /* USER CODE END 5 */
+}
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM6 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM6)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.
@@ -470,7 +942,6 @@ static void MX_GPIO_Init(void)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
