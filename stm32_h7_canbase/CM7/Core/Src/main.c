@@ -115,9 +115,9 @@ volatile OdomMeasurement_t gOdom = {0.0f};
 // ORIGIN {163,62} FOR CAMERA
 Waypoint_t path[] = {
     {20.0f, 0.0f},
-    {70.0f, 30.0f},
-    {90.0f, 0.0f},
-  	{120.0f, -15.0f}
+    {50.0f, 15.0f},
+    {75.0f, 10.0f},
+  	{100.0f, -15.0f}
 };
 
 int total_waypoints = sizeof(path) / sizeof(path[0]);

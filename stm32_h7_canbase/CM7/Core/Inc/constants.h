@@ -86,18 +86,17 @@ typedef enum {
 // Robot Constants
 #define TICKS_PER_REV      230
 #define WHEEL_RADIUS_M     0.0314f
-// #define WHEEL_BASE         0.1365f
 #define WHEEL_BASE         0.3f
 
 #define APPROACH_DISTANCE    10.0f      
 #define FINAL_APPROACH_DIST  5.0f       
-#define CRUISE_SPEED_US      1800      
-#define APPROACH_SPEED_US    1750     
+#define CRUISE_SPEED_US      1750      
+#define APPROACH_SPEED_US    1700     
 #define FINAL_SPEED_US       1650      
 #define STOP_SPEED_US        1500
 
 #define ESC_NEUTRAL 1500
-#define ESC_CRAWL   2000
+#define ESC_CRAWL   1900
 #define ESC_BRAKE   1350  
 
 #define INTEGRAL_MAX_LIMIT   50.0f
