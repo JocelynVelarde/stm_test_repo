@@ -114,11 +114,12 @@ volatile OdomMeasurement_t gOdom = {0.0f};
 
 // ORIGIN {163,62} FOR CAMERA
 Waypoint_t path[] = {
-    {66.0f, 38.0f},
-    {100.0f, -10.0f},
-    {100.0f, -45.0f},
-  	{140.0f, -10.0f}
+    {20.0f, 0.0f},
+    {70.0f, 30.0f},
+    {90.0f, 0.0f},
+  	{120.0f, -15.0f}
 };
+
 int total_waypoints = sizeof(path) / sizeof(path[0]);
 int current_wp_idx = 0;
 uint8_t finished_path = 0;
@@ -704,13 +705,6 @@ void StartMotionTask(void *argument)
   TickType_t last_tick_time = xTaskGetTickCount();
   for(;;)
   {
-    if (!system_initialized)
-    {
-      Motion_Stop(&robotMotion);
-      osDelay(TASK_PERIOD_MS);
-      continue;
-    }
-    
     TickType_t current_tick_time = xTaskGetTickCount();
     float actual_dt = (float)(current_tick_time - last_tick_time) / (float)configTICK_RATE_HZ;
     last_tick_time = current_tick_time;
@@ -737,17 +731,32 @@ void StartMotionTask(void *argument)
 
     while (osMessageQueueGet(cameraQueueHandle, &cameraData, NULL, 0) == osOK)
     {
-      Global_Cam_X = (float)cameraData.x;
-      Global_Cam_Y = (float)cameraData.y;
+      if (cameraData.x != -1 && cameraData.y != -1)
+      {
+        Global_Cam_X = (float)cameraData.x;
+        Global_Cam_Y = (float)cameraData.y;
+      }
       
       if (!cameraCalibrated && currentOdomMode == ODOM_MODE_CAMERA)
       {
         cameraOffsetX = Global_Cam_X;
         cameraOffsetY = Global_Cam_Y;
         cameraCalibrated = 1;
+        system_initialized = 1;  // Inicia automáticamente cuando la cámara se calibra
+        robotMotion.current_wp_idx = 0;  // Reinicia al primer waypoint
+        robotMotion.path_finished = 0;   // Resetea el flag de ruta terminada
         printf(">>> CAMERA CALIBRATED at (%.0f, %.0f)\r\n", cameraOffsetX, cameraOffsetY);
+        printf(">>> INICIANDO MOVIMIENTO AUTOMATICAMENTE\r\n");
         sendHC(">>> CAMERA CALIBRATED at (%.0f, %.0f)\r\n", cameraOffsetX, cameraOffsetY);
+        sendHC(">>> INICIANDO MOVIMIENTO AUTOMATICAMENTE\r\n");
       }
+    }
+    
+    if (!system_initialized)
+    {
+      Motion_Stop(&robotMotion);
+      osDelay(TASK_PERIOD_MS);
+      continue;
     }
     if (currentOdomMode == ODOM_MODE_LOCAL)
     {
@@ -821,23 +830,28 @@ void StartMotionTask(void *argument)
         }
     }
     else if (currentOdomMode == ODOM_MODE_CAMERA) {
-        float dx_cam = target_x - Global_Cam_X;
-        float dy_cam = target_y - Global_Cam_Y;
+        float camera_world_x = cameraOffsetX - target_x;
+        float camera_world_y = cameraOffsetY + target_y;
+        
+        float dx_cam = camera_world_x - Global_Cam_X;
+        float dy_cam = camera_world_y - Global_Cam_Y;
         float dist_cam = sqrtf(dx_cam*dx_cam + dy_cam*dy_cam);
 
         if (dist_cam < CAMERA_WAYPOINT_THRESHOLD) {
             HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_SET);
             LED_State = 1;
-            osDelay(500);
+            printf(">>> REACHED WP %d at Cam(%.1f, %.1f) [Camera-based]\r\n", 
+                   robotMotion.current_wp_idx + 1, Global_Cam_X, Global_Cam_Y);
+
+            Motion_Stop(&robotMotion);
+            osDelay(2000);
             HAL_GPIO_WritePin(FLAG_INDICATOR_GPIO_Port, FLAG_INDICATOR_Pin, GPIO_PIN_RESET);
             LED_State = 0;
-
-            printf(">>> REACHED WP %d at Cam(%.1f, %.1f) Odo(%.1f, %.1f) [CAMERA ODOM]\r\n", 
-                   robotMotion.current_wp_idx + 1, Global_Cam_X, Global_Cam_Y, Global_Robot_X, Global_Robot_Y);
 
             Motion_NextWaypoint(&robotMotion);
             if (robotMotion.path_finished) {
                 printf(">>> PATH FINISHED \r\n");
+                Motion_Stop(&robotMotion);
             }
         }
     }
@@ -891,42 +905,10 @@ void StartTelemetryTask(void *argument)
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN 5 */
-  printf(">>> SISTEMA EN ESPERA DE INICIALIZACION\r\n");
-  sendHC(">>> SISTEMA EN ESPERA DE INICIALIZACION\r\n");
-  
   for(;;)
   {
-    // Parpadeo lento mientras espera inicialización
     HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
     osDelay(1000);
-    
-    // Verifica si hay datos recibidos por Bluetooth
-    const char* btData = HC05_GetData();
-    if (btData != NULL && strlen(btData) > 0)
-    {
-      // Verifica si recibió 'r' (comando de inicio)
-      if (btData[0] == 'r' || btData[0] == 'R')
-      {
-        if (cameraCalibrated)
-        {
-          // Cámara está inicializada, inicia el movimiento
-          system_initialized = 1;
-          robotMotion.current_wp_idx = 0;  // Reinicia al primer waypoint
-          robotMotion.path_finished = 0;   // Resetea el flag de ruta terminada
-          printf(">>> CAMARA INICIALIZADA - INICIANDO MOVIMIENTO\r\n");
-          sendHC(">>> CAMARA INICIALIZADA - INICIANDO MOVIMIENTO\r\n");
-        }
-        else
-        {
-          // Cámara no está inicializada, envía mensaje de error
-          printf(">>> CAMARA AUN NO INICIALIZADA\r\n");
-          sendHC(">>> CAMARA AUN NO INICIALIZADA\r\n");
-        }
-        
-        // Limpia el buffer para la siguiente lectura
-        memset((char*)btData, 0, BUFFER_SIZE);
-      }
-    }
   }
   /* USER CODE END 5 */
 }

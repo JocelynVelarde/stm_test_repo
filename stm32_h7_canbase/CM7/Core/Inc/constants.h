@@ -77,7 +77,7 @@ typedef enum {
 #define SERVO_MOVE_MIN_MS       10
 #define SERVO_LIMIT_LEFT_DEG   30.0f
 #define SERVO_CENTER_DEG      110.0f
-#define SERVO_LIMIT_RIGHT_DEG 140.0f
+#define SERVO_LIMIT_RIGHT_DEG 155.0f
 #define SERVO_CENTER_PWM       1750.0f
 #define SERVO_MIN_PWM           544.0f
 #define SERVO_MAX_PWM          2400.0f
@@ -87,16 +87,17 @@ typedef enum {
 #define TICKS_PER_REV      230
 #define WHEEL_RADIUS_M     0.0314f
 // #define WHEEL_BASE         0.1365f
-#define WHEEL_BASE         0.50
+#define WHEEL_BASE         0.3f
 
 #define APPROACH_DISTANCE    10.0f      
-#define FINAL_APPROACH_DIST  5.0f    
+#define FINAL_APPROACH_DIST  5.0f       
 #define CRUISE_SPEED_US      1800      
-#define APPROACH_SPEED_US    1720     
-#define FINAL_SPEED_US       1550      
+#define APPROACH_SPEED_US    1750     
+#define FINAL_SPEED_US       1650      
 #define STOP_SPEED_US        1500
+
 #define ESC_NEUTRAL 1500
-#define ESC_CRAWL   1800
+#define ESC_CRAWL   2000
 #define ESC_BRAKE   1350  
 
 #define INTEGRAL_MAX_LIMIT   50.0f
@@ -104,12 +105,13 @@ typedef enum {
 #define MIN_DT              0.001f      
 #define MAX_DT              0.1f      
 
-#define CAM_THRESHOLD    10.0f
-#define TARGET_THRESHOLD 2.0f
+#define CAM_THRESHOLD    5.0f
+#define TARGET_THRESHOLD 5.0f
+#define CAMERA_WAYPOINT_THRESHOLD 5.0f
 #define CAN_ID_SENSOR    0x30
 #define CAN_ID_CAMERA    0x35
 
-#define LOOKAHEAD_DIST   15.0f          
+#define LOOKAHEAD_DIST   20.0f          
 #define MAX_STEER_ANGLE  1.0f          
 #define DEG_TO_RAD       (M_PI / 180.0f)
 #define RAD_TO_DEG       (180.0f / M_PI)
