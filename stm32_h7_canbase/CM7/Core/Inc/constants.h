@@ -75,7 +75,7 @@ typedef enum {
 // Servo Constants
 #define SERVO_PERIOD_US       20000.0f
 #define SERVO_MOVE_MIN_MS       10
-#define SERVO_LIMIT_LEFT_DEG   30.0f
+#define SERVO_LIMIT_LEFT_DEG   45.0f
 #define SERVO_CENTER_DEG      110.0f
 #define SERVO_LIMIT_RIGHT_DEG 155.0f
 #define SERVO_CENTER_PWM       1750.0f
@@ -86,7 +86,7 @@ typedef enum {
 // Robot Constants
 #define TICKS_PER_REV      230
 #define WHEEL_RADIUS_M     0.0314f
-#define WHEEL_BASE         0.3f
+#define WHEEL_BASE         0.25f
 
 #define APPROACH_DISTANCE    10.0f      
 #define FINAL_APPROACH_DIST  5.0f       
@@ -96,7 +96,7 @@ typedef enum {
 #define STOP_SPEED_US        1500
 
 #define ESC_NEUTRAL 1500
-#define ESC_CRAWL   1900
+#define ESC_CRAWL   1750
 #define ESC_BRAKE   1350  
 
 #define INTEGRAL_MAX_LIMIT   50.0f
@@ -104,14 +104,14 @@ typedef enum {
 #define MIN_DT              0.001f      
 #define MAX_DT              0.1f      
 
-#define CAM_THRESHOLD    5.0f
+#define CAM_THRESHOLD    10.0f
 #define TARGET_THRESHOLD 5.0f
-#define CAMERA_WAYPOINT_THRESHOLD 5.0f
+#define CAMERA_WAYPOINT_THRESHOLD 10.0f
 #define CAN_ID_SENSOR    0x30
 #define CAN_ID_CAMERA    0x35
 
 #define LOOKAHEAD_DIST   20.0f          
-#define MAX_STEER_ANGLE  1.0f          
+#define MAX_STEER_ANGLE  0.75f          
 #define DEG_TO_RAD       (M_PI / 180.0f)
 #define RAD_TO_DEG       (180.0f / M_PI)
 
